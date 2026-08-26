@@ -74,6 +74,8 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
         ref.watch(messagesStreamProvider(widget.conversationId));
     final statusesAsync = ref.watch(messageStatusesStreamProvider);
     final sending = ref.watch(sendMessageControllerProvider).isLoading;
+    final uploadingMedia =
+        ref.watch(sendMediaMessageControllerProvider).isLoading;
 
     // Only fetch the conversation row when we weren't handed one via
     // `extra` (e.g. a deep link straight into a group chat).
@@ -256,16 +258,62 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
           ),
           ChatInputBar(
             sending: sending,
-            onSend: (text) => ref
-                .read(sendMessageControllerProvider.notifier)
-                .sendText(conversationId: widget.conversationId, content: text),
+            uploadingMedia: uploadingMedia,
+            onSend: (text) =>
+                ref.read(sendMessageControllerProvider.notifier).sendText(
+                      conversationId: widget.conversationId,
+                      content: text,
+                    ),
             onTextChanged: (text) => ref
                 .read(typingControllerProvider.notifier)
                 .onTextChanged(widget.conversationId, text),
+            onSendImage: (bytes, ext) => _sendMedia(
+              () => ref
+                  .read(sendMediaMessageControllerProvider.notifier)
+                  .sendImage(
+                    conversationId: widget.conversationId,
+                    bytes: bytes,
+                    fileExt: ext,
+                  ),
+            ),
+            onSendVideo: (bytes, ext) => _sendMedia(
+              () => ref
+                  .read(sendMediaMessageControllerProvider.notifier)
+                  .sendVideo(
+                    conversationId: widget.conversationId,
+                    bytes: bytes,
+                    fileExt: ext,
+                  ),
+            ),
+            onSendDocument: (bytes, fileName) => _sendMedia(
+              () => ref
+                  .read(sendMediaMessageControllerProvider.notifier)
+                  .sendDocument(
+                    conversationId: widget.conversationId,
+                    bytes: bytes,
+                    fileName: fileName,
+                  ),
+            ),
           ),
         ],
       ),
     );
+  }
+
+  /// Shared error-surfacing wrapper for every Phase 5 media send —
+  /// avoids repeating "await, check ok, read error, show snackbar"
+  /// three times over (image/video/document).
+  Future<void> _sendMedia(Future<bool> Function() send) async {
+    final ok = await send();
+    if (!ok && mounted) {
+      final error = ref.read(sendMediaMessageControllerProvider).error;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error?.toString() ?? 'Could not send attachment.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 
   /// Phase 4 subtitle line shown under the title: typing takes priority

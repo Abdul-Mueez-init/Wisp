@@ -55,6 +55,36 @@ class MessageRepository {
     }
   }
 
+  /// Generic media-message insert — covers 'image' now (Batch 5a) and
+  /// 'video'/'document' from Batch 5b on, since all three share the
+  /// same shape: a storage path in `media_url`, an optional caption in
+  /// `content`. [messageId] is generated client-side by the caller so
+  /// it can be reused as the storage path segment (see
+  /// MediaRepository) — inserted explicitly instead of relying on the
+  /// column default.
+  Future<void> sendMediaMessage({
+    required String messageId,
+    required String conversationId,
+    required String senderId,
+    required String type,
+    required String mediaPath,
+    String? caption,
+  }) async {
+    try {
+      final trimmedCaption = caption?.trim();
+      await _client.from('messages').insert({
+        'id': messageId,
+        'conversation_id': conversationId,
+        'sender_id': senderId,
+        'type': type,
+        'content': (trimmedCaption?.isEmpty ?? true) ? null : trimmedCaption,
+        'media_url': mediaPath,
+      });
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   /// Inserts a 'delivered' `message_status` row (as the recipient
   /// themselves — required by the `message_status_insert_own` RLS
   /// policy) for any message in [conversationId] not sent by [myId]

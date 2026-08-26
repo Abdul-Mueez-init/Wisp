@@ -3,24 +3,37 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../../models/conversation.dart';
 import '../../../models/message.dart';
 import '../../../models/profile.dart';
 import '../../auth/providers/auth_provider.dart';
+import '../../groups/providers/group_provider.dart';
+import '../providers/conversation_provider.dart';
 import '../providers/message_provider.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
 
-/// Real Phase 2 chat detail screen — replaces the router's temporary
-/// placeholder. Built off the Stitch `chat_detail_1_on_1` export.
+/// Phase 2 1-on-1 chat core, extended in Phase 3 to also render group
+/// conversations (plan.md: "Group chat detail screen (reuses chat core
+/// from Phase 2)") — same message stream/input, plus a group-aware app
+/// bar and sender-name labels on received bubbles.
 class ChatDetailScreen extends ConsumerStatefulWidget {
   const ChatDetailScreen({
     super.key,
     required this.conversationId,
     this.otherProfile,
+    this.groupConversation,
   });
 
   final String conversationId;
+
+  /// Passed via navigation `extra` when opening a direct chat from
+  /// search results — avoids an extra fetch (Phase 2).
   final Profile? otherProfile;
+
+  /// Passed via navigation `extra` right after creating a group — same
+  /// reasoning as [otherProfile] (Phase 3).
+  final Conversation? groupConversation;
 
   @override
   ConsumerState<ChatDetailScreen> createState() => _ChatDetailScreenState();
@@ -30,9 +43,6 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   @override
   void initState() {
     super.initState();
-    // Fire-and-forget: syncing read receipts is a side effect, not
-    // shared app state, so calling the repository directly here (rather
-    // than routing it through a watched provider) is appropriate.
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncReadReceipts());
   }
 
@@ -40,10 +50,6 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final myId = ref.read(currentSessionProvider)?.user.id;
     if (myId == null) return;
     final repo = ref.read(messageRepositoryProvider);
-    // Sequenced deliberately: 'delivered' then 'read' so the row
-    // genuinely passes through both states (see context.md note on why
-    // they currently land back-to-back until a chat-list-level listener
-    // exists).
     await repo.markDelivered(conversationId: widget.conversationId, myId: myId);
     await repo.markRead(conversationId: widget.conversationId, myId: myId);
   }
@@ -54,47 +60,67 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final messagesAsync =
         ref.watch(messagesStreamProvider(widget.conversationId));
     final statusesAsync = ref.watch(messageStatusesStreamProvider);
-    final otherProfileAsync = widget.otherProfile != null
-        ? null
-        : ref.watch(otherDirectMemberProvider(widget.conversationId));
     final sending = ref.watch(sendMessageControllerProvider).isLoading;
 
-    // Re-sync read receipts whenever new messages land while the screen
-    // is open (safe: this writes to message_status, not messages, so it
-    // can't feed back into the messages stream it's reacting to).
+    // Only fetch the conversation row when we weren't handed one via
+    // `extra` (e.g. a deep link straight into a group chat).
+    final needsConversationFetch =
+        widget.otherProfile == null && widget.groupConversation == null;
+    final conversationAsync = needsConversationFetch
+        ? ref.watch(conversationByIdProvider(widget.conversationId))
+        : null;
+    final resolvedConversation =
+        widget.groupConversation ?? conversationAsync?.value;
+    final isGroup = resolvedConversation?.isGroup ?? false;
+
+    final otherProfileAsync = (!isGroup && widget.otherProfile == null)
+        ? ref.watch(otherDirectMemberProvider(widget.conversationId))
+        : null;
+    final displayProfile = widget.otherProfile ?? otherProfileAsync?.value;
+
+    final membersAsync =
+        isGroup ? ref.watch(groupMembersProvider(widget.conversationId)) : null;
+    final senderNames = <String, String>{
+      for (final m in membersAsync?.value ?? const [])
+        m.profile.id: m.profile.displayName?.isNotEmpty == true
+            ? m.profile.displayName!
+            : '@${m.profile.username}',
+    };
+
     ref.listen(messagesStreamProvider(widget.conversationId), (prev, next) {
       if (next.hasValue) _syncReadReceipts();
     });
-
-    final displayProfile = widget.otherProfile ?? (otherProfileAsync?.value);
 
     return Scaffold(
       backgroundColor: AppColors.backgroundBase,
       appBar: AppBar(
         titleSpacing: 0,
-        title: Row(
-          children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: AppColors.surfaceContainerHigh,
-              child: Text(
-                (displayProfile?.displayName?.isNotEmpty == true
-                        ? displayProfile!.displayName!
-                        : displayProfile?.username ?? '?')
-                    .substring(0, 1)
-                    .toUpperCase(),
-                style: const TextStyle(color: AppColors.primary),
+        title: InkWell(
+          onTap: isGroup
+              ? () => context.push('/group/${widget.conversationId}/members')
+              : null,
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: AppColors.surfaceContainerHigh,
+                child: Text(
+                  _titleInitial(isGroup, resolvedConversation, displayProfile),
+                  style: const TextStyle(color: AppColors.primary),
+                ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                displayProfile != null ? '@${displayProfile.username}' : 'Chat',
-                style: Theme.of(context).textTheme.titleMedium,
-                overflow: TextOverflow.ellipsis,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _titleText(isGroup, resolvedConversation, displayProfile),
+                  style: Theme.of(context).textTheme.titleMedium,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ],
+              if (isGroup)
+                const Icon(Icons.chevron_right, color: AppColors.outline),
+            ],
+          ),
         ),
       ),
       body: Column(
@@ -125,15 +151,19 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                     final isMine = message.senderId == myId;
                     String? status;
                     if (isMine) {
-                      final match = statuses.where(
-                        (s) => s.messageId == message.id,
-                      );
+                      final match =
+                          statuses.where((s) => s.messageId == message.id);
                       if (match.isNotEmpty) status = match.first.status;
                     }
+                    final senderLabel =
+                        (isGroup && !isMine && message.senderId != null)
+                            ? senderNames[message.senderId]
+                            : null;
                     return MessageBubble(
                       message: message,
                       isMine: isMine,
                       status: status,
+                      senderLabel: senderLabel,
                     );
                   },
                 );
@@ -158,5 +188,27 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
         ],
       ),
     );
+  }
+
+  String _titleText(
+      bool isGroup, Conversation? conversation, Profile? displayProfile) {
+    if (isGroup) return conversation?.name ?? 'Group';
+    return displayProfile != null ? '@${displayProfile.username}' : 'Chat';
+  }
+
+  String _titleInitial(
+      bool isGroup, Conversation? conversation, Profile? displayProfile) {
+    if (isGroup) {
+      final name = conversation?.name;
+      return (name != null && name.isNotEmpty)
+          ? name.substring(0, 1).toUpperCase()
+          : 'G';
+    }
+    final name = displayProfile?.displayName?.isNotEmpty == true
+        ? displayProfile!.displayName!
+        : displayProfile?.username;
+    return (name != null && name.isNotEmpty)
+        ? name.substring(0, 1).toUpperCase()
+        : '?';
   }
 }

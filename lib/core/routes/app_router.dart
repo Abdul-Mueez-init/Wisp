@@ -8,14 +8,14 @@ import '../../features/auth/screens/login_signup_screen.dart';
 import '../../features/auth/screens/onboarding_screen.dart';
 import '../../features/chat/screens/chat_detail_screen.dart';
 import '../../features/contacts/screens/user_search_screen.dart';
+import '../../features/groups/screens/group_creation_screen.dart';
+import '../../features/groups/screens/group_members_screen.dart';
 import '../../features/profile/providers/profile_provider.dart';
+import '../../models/conversation.dart';
 import '../../models/profile.dart';
 
 /// Router as a Riverpod provider so it can watch auth/profile state and
-/// redirect accordingly. Rebuilding the GoRouter instance on state
-/// changes is a deliberately simple choice at this app's scale — each
-/// rebuild resets to `/`, and the redirect logic below immediately
-/// resolves it to the correct screen.
+/// redirect accordingly.
 final routerProvider = Provider<GoRouter>((ref) {
   final session = ref.watch(currentSessionProvider);
   final isAuthenticated = session != null;
@@ -34,8 +34,6 @@ final routerProvider = Provider<GoRouter>((ref) {
       }
       if (loggingIn) return '/';
 
-      // Don't redirect while profile status is still resolving — avoids
-      // a flash to /onboarding before the fetch completes.
       return profileAsync.when(
         data: (profile) {
           final hasProfile = profile != null;
@@ -64,19 +62,28 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/search',
         builder: (context, state) => const UserSearchScreen(),
       ),
-      // Placeholder target for "start conversation" until the real chat
-      // detail screen lands (plan.md Phase 2, next session unit per
-      // handoff_Phase_1_doc.md's suggested split). Deliberately minimal,
-      // not a silent scope drop — see context.md.
+      GoRoute(
+        path: '/group/new',
+        builder: (context, state) => const GroupCreationScreen(),
+      ),
+      GoRoute(
+        path: '/group/:id/members',
+        builder: (context, state) {
+          final conversationId = state.pathParameters['id']!;
+          return GroupMembersScreen(conversationId: conversationId);
+        },
+      ),
       GoRoute(
         path: '/chat/:id',
         builder: (context, state) {
           final conversationId = state.pathParameters['id']!;
-          final otherProfile =
-              state.extra is Profile ? state.extra as Profile : null;
+          final extra = state.extra;
+          final otherProfile = extra is Profile ? extra : null;
+          final groupConversation = extra is Conversation ? extra : null;
           return ChatDetailScreen(
             conversationId: conversationId,
             otherProfile: otherProfile,
+            groupConversation: groupConversation,
           );
         },
       ),
@@ -111,6 +118,12 @@ class _BootstrapScreen extends ConsumerWidget {
               onPressed: () => GoRouter.of(context).push('/search'),
               icon: const Icon(Icons.person_search_outlined),
               label: const Text('Find people'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => GoRouter.of(context).push('/group/new'),
+              icon: const Icon(Icons.groups_outlined),
+              label: const Text('New group'),
             ),
             const SizedBox(height: 12),
             TextButton(

@@ -103,4 +103,21 @@ class ConversationRepository {
 
     return Conversation.fromJson(convRow);
   }
+
+  /// Fetches a single conversation row by id — used by the chat detail
+  /// screen to resolve a group's name/type when it wasn't passed in via
+  /// navigation `extra` (Phase 3).
+  Future<Conversation?> getConversation(String conversationId) async {
+    try {
+      final row = await _client
+          .from('conversations')
+          .select()
+          .eq('id', conversationId)
+          .maybeSingle();
+      if (row == null) return null;
+      return Conversation.fromJson(row);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
 }

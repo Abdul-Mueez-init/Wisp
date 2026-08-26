@@ -4,9 +4,9 @@ import '../../../config/supabase_config.dart';
 import '../../../core/errors/failure.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../data/conversation_repository.dart';
+import '../../../models/conversation.dart';
 
-final conversationRepositoryProvider =
-    Provider<ConversationRepository>((ref) {
+final conversationRepositoryProvider = Provider<ConversationRepository>((ref) {
   return ConversationRepository(SupabaseConfig.client);
 });
 
@@ -44,3 +44,12 @@ final startConversationControllerProvider =
     AsyncNotifierProvider<StartConversationController, void>(
   StartConversationController.new,
 );
+
+/// Resolves a conversation's own row (name, type, etc.) — used when the
+/// chat detail screen wasn't handed one via navigation `extra`.
+final conversationByIdProvider =
+    FutureProvider.family<Conversation?, String>((ref, conversationId) {
+  return ref
+      .read(conversationRepositoryProvider)
+      .getConversation(conversationId);
+});

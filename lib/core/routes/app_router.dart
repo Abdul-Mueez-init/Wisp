@@ -6,7 +6,10 @@ import '../theme/app_theme.dart';
 import '../../features/auth/providers/auth_provider.dart';
 import '../../features/auth/screens/login_signup_screen.dart';
 import '../../features/auth/screens/onboarding_screen.dart';
+import '../../features/chat/screens/chat_detail_screen.dart';
+import '../../features/contacts/screens/user_search_screen.dart';
 import '../../features/profile/providers/profile_provider.dart';
+import '../../models/profile.dart';
 
 /// Router as a Riverpod provider so it can watch auth/profile state and
 /// redirect accordingly. Rebuilding the GoRouter instance on state
@@ -57,6 +60,26 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/onboarding',
         builder: (context, state) => const OnboardingScreen(),
       ),
+      GoRoute(
+        path: '/search',
+        builder: (context, state) => const UserSearchScreen(),
+      ),
+      // Placeholder target for "start conversation" until the real chat
+      // detail screen lands (plan.md Phase 2, next session unit per
+      // handoff_Phase_1_doc.md's suggested split). Deliberately minimal,
+      // not a silent scope drop — see context.md.
+      GoRoute(
+        path: '/chat/:id',
+        builder: (context, state) {
+          final conversationId = state.pathParameters['id']!;
+          final otherProfile =
+              state.extra is Profile ? state.extra as Profile : null;
+          return ChatDetailScreen(
+            conversationId: conversationId,
+            otherProfile: otherProfile,
+          );
+        },
+      ),
     ],
   );
 });
@@ -84,6 +107,12 @@ class _BootstrapScreen extends ConsumerWidget {
                   Text('$e', style: const TextStyle(color: AppColors.error)),
             ),
             const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () => GoRouter.of(context).push('/search'),
+              icon: const Icon(Icons.person_search_outlined),
+              label: const Text('Find people'),
+            ),
+            const SizedBox(height: 12),
             TextButton(
               onPressed: () =>
                   ref.read(authControllerProvider.notifier).signOut(),

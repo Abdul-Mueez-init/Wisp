@@ -10,6 +10,8 @@ import '../../auth/providers/auth_provider.dart';
 import '../../groups/providers/group_provider.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/message_provider.dart';
+import '../providers/presence_provider.dart';
+import '../providers/typing_provider.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
 
@@ -55,6 +57,17 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   }
 
   @override
+  void dispose() {
+    // Best-effort — clear our own typing row so we don't leave a stale
+    // "typing…" showing for the other participant(s) after navigating
+    // away (Phase 4).
+    ref
+        .read(typingControllerProvider.notifier)
+        .stopTyping(widget.conversationId);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final myId = ref.watch(currentSessionProvider)?.user.id;
     final messagesAsync =
@@ -91,6 +104,26 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
       if (next.hasValue) _syncReadReceipts();
     });
 
+    // Phase 4 — presence (direct chats only; groups have no single
+    // "other user" to show a dot for) and typing, for both chat types.
+    final livePresence = (!isGroup && displayProfile != null)
+        ? ref.watch(watchProfileProvider(displayProfile.id))
+        : null;
+    final isOnline = livePresence?.value?.isOnline ?? displayProfile?.isOnline;
+    final lastSeenAt =
+        livePresence?.value?.lastSeenAt ?? displayProfile?.lastSeenAt;
+
+    final typingUserIds =
+        ref.watch(typingUsersStreamProvider(widget.conversationId)).value ??
+            const [];
+    final subtitleText = _subtitleText(
+      isGroup: isGroup,
+      typingUserIds: typingUserIds,
+      senderNames: senderNames,
+      isOnline: isOnline,
+      lastSeenAt: lastSeenAt,
+    );
+
     return Scaffold(
       backgroundColor: AppColors.backgroundBase,
       appBar: AppBar(
@@ -101,20 +134,62 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
               : null,
           child: Row(
             children: [
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: AppColors.surfaceContainerHigh,
-                child: Text(
-                  _titleInitial(isGroup, resolvedConversation, displayProfile),
-                  style: const TextStyle(color: AppColors.primary),
-                ),
+              Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  CircleAvatar(
+                    radius: 18,
+                    backgroundColor: AppColors.surfaceContainerHigh,
+                    child: Text(
+                      _titleInitial(
+                          isGroup, resolvedConversation, displayProfile),
+                      style: const TextStyle(color: AppColors.primary),
+                    ),
+                  ),
+                  // design.md "Status & Indicators — Online Dot": 8px
+                  // solid circle in Moderate Green.
+                  if (!isGroup && isOnline == true)
+                    Positioned(
+                      right: -1,
+                      bottom: -1,
+                      child: Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: AppColors.primary,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: AppColors.backgroundBase,
+                            width: 1.5,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  _titleText(isGroup, resolvedConversation, displayProfile),
-                  style: Theme.of(context).textTheme.titleMedium,
-                  overflow: TextOverflow.ellipsis,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      _titleText(isGroup, resolvedConversation, displayProfile),
+                      style: Theme.of(context).textTheme.titleMedium,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    if (subtitleText != null)
+                      Text(
+                        subtitleText,
+                        style:
+                            Theme.of(context).textTheme.labelMedium?.copyWith(
+                                  color: typingUserIds.isNotEmpty
+                                      ? AppColors.primary
+                                      : AppColors.onSurfaceVariant,
+                                ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                  ],
                 ),
               ),
               if (isGroup)
@@ -184,10 +259,46 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
             onSend: (text) => ref
                 .read(sendMessageControllerProvider.notifier)
                 .sendText(conversationId: widget.conversationId, content: text),
+            onTextChanged: (text) => ref
+                .read(typingControllerProvider.notifier)
+                .onTextChanged(widget.conversationId, text),
           ),
         ],
       ),
     );
+  }
+
+  /// Phase 4 subtitle line shown under the title: typing takes priority
+  /// over presence, since it's more immediately relevant.
+  String? _subtitleText({
+    required bool isGroup,
+    required List<String> typingUserIds,
+    required Map<String, String> senderNames,
+    required bool? isOnline,
+    required DateTime? lastSeenAt,
+  }) {
+    if (typingUserIds.isNotEmpty) {
+      if (!isGroup) return 'typing…';
+      final names = typingUserIds
+          .map((id) => senderNames[id] ?? 'Someone')
+          .take(2)
+          .join(', ');
+      return typingUserIds.length > 2
+          ? '$names and others typing…'
+          : '$names typing…';
+    }
+    if (isGroup) return null; // no per-group presence concept (ERD.md)
+    if (isOnline == true) return 'online';
+    if (lastSeenAt != null) return _lastSeenLabel(lastSeenAt);
+    return null;
+  }
+
+  String _lastSeenLabel(DateTime lastSeenAt) {
+    final diff = DateTime.now().difference(lastSeenAt);
+    if (diff.inMinutes < 1) return 'last seen just now';
+    if (diff.inMinutes < 60) return 'last seen ${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return 'last seen ${diff.inHours}h ago';
+    return 'last seen ${diff.inDays}d ago';
   }
 
   String _titleText(

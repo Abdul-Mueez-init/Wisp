@@ -5,10 +5,20 @@ import '../../../core/theme/app_theme.dart';
 /// Floating chat input per design.md "Inputs" component: Surface-Raised
 /// background, hairline border, pill shape, 8px margin from safe area.
 class ChatInputBar extends StatefulWidget {
-  const ChatInputBar({super.key, required this.onSend, required this.sending});
+  const ChatInputBar({
+    super.key,
+    required this.onSend,
+    required this.sending,
+    this.onTextChanged,
+  });
 
   final void Function(String text) onSend;
   final bool sending;
+
+  /// Fired on every keystroke (and once with '' right after a send) so
+  /// the typing indicator can debounce off of it. Optional — omitting
+  /// it just means no typing signal is sent.
+  final void Function(String text)? onTextChanged;
 
   @override
   State<ChatInputBar> createState() => _ChatInputBarState();
@@ -28,6 +38,9 @@ class _ChatInputBarState extends State<ChatInputBar> {
     if (text.trim().isEmpty || widget.sending) return;
     widget.onSend(text);
     _controller.clear();
+    // controller.clear() doesn't fire TextField.onChanged on its own —
+    // signal "stopped typing" explicitly.
+    widget.onTextChanged?.call('');
   }
 
   @override
@@ -57,6 +70,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   maxLines: 5,
                   textCapitalization: TextCapitalization.sentences,
                   style: Theme.of(context).textTheme.bodyLarge,
+                  onChanged: widget.onTextChanged,
                   onSubmitted: (_) => _submit(),
                   decoration: InputDecoration(
                     hintText: 'Message',

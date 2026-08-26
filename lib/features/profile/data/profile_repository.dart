@@ -41,6 +41,36 @@ class ProfileRepository {
     }
   }
 
+  /// Realtime stream of a single profile row — used by Phase 4
+  /// presence/last-seen UI to show another user's online status live,
+  /// the same "StreamProvider watching a Supabase Realtime stream"
+  /// pattern used elsewhere (architecture.md).
+  Stream<Profile?> watchProfile(String userId) {
+    return _client
+        .from('profiles')
+        .stream(primaryKey: ['id'])
+        .eq('id', userId)
+        .map((rows) => rows.isEmpty ? null : Profile.fromJson(rows.first));
+  }
+
+  /// Flips this user's `is_online` flag. `last_seen_at` is only stamped
+  /// when going offline — per ERD.md it represents *last seen*, so it
+  /// has no meaning to update while the user is still online.
+  Future<void> setOnlineStatus({
+    required String userId,
+    required bool isOnline,
+  }) async {
+    try {
+      final payload = <String, dynamic>{'is_online': isOnline};
+      if (!isOnline) {
+        payload['last_seen_at'] = DateTime.now().toIso8601String();
+      }
+      await _client.from('profiles').update(payload).eq('id', userId);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   Future<Profile> createProfile({
     required String id,
     required String username,

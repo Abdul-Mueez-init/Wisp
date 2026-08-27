@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../theme/app_theme.dart';
+import 'app_shell.dart';
 import '../../features/auth/providers/auth_provider.dart';
 import '../../features/auth/screens/login_signup_screen.dart';
 import '../../features/auth/screens/onboarding_screen.dart';
@@ -11,6 +11,7 @@ import '../../features/contacts/screens/user_search_screen.dart';
 import '../../features/groups/screens/group_creation_screen.dart';
 import '../../features/groups/screens/group_members_screen.dart';
 import '../../features/profile/providers/profile_provider.dart';
+import '../../features/stories/screens/story_capture_screen.dart';
 import '../../models/conversation.dart';
 import '../../models/profile.dart';
 
@@ -47,8 +48,10 @@ final routerProvider = Provider<GoRouter>((ref) {
     },
     routes: [
       GoRoute(
+        // Batch 6b: was a bootstrap placeholder, now the real
+        // bottom-nav shell (Chats/Status/Calls/Settings).
         path: '/',
-        builder: (context, state) => const _BootstrapScreen(),
+        builder: (context, state) => const AppShell(),
       ),
       GoRoute(
         path: '/login',
@@ -87,53 +90,11 @@ final routerProvider = Provider<GoRouter>((ref) {
           );
         },
       ),
+      GoRoute(
+        // Batch 6b: launched from the Status tab's "My status" row.
+        path: '/status/new',
+        builder: (context, state) => const StoryCaptureScreen(),
+      ),
     ],
   );
 });
-
-class _BootstrapScreen extends ConsumerWidget {
-  const _BootstrapScreen();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(currentProfileProvider);
-    return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text('Wisp', style: Theme.of(context).textTheme.headlineLarge),
-            const SizedBox(height: 8),
-            profile.when(
-              data: (p) => Text(
-                p != null ? 'Signed in as @${p.username}' : 'Loading profile…',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              loading: () => const CircularProgressIndicator(strokeWidth: 2),
-              error: (e, _) =>
-                  Text('$e', style: const TextStyle(color: AppColors.error)),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: () => GoRouter.of(context).push('/search'),
-              icon: const Icon(Icons.person_search_outlined),
-              label: const Text('Find people'),
-            ),
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () => GoRouter.of(context).push('/group/new'),
-              icon: const Icon(Icons.groups_outlined),
-              label: const Text('New group'),
-            ),
-            const SizedBox(height: 12),
-            TextButton(
-              onPressed: () =>
-                  ref.read(authControllerProvider.notifier).signOut(),
-              child: const Text('Sign out'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}

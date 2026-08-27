@@ -7,3 +7,29 @@ String formatFileSize(int? bytes) {
   if (bytes >= kb) return '${(bytes / kb).toStringAsFixed(0)} KB';
   return '$bytes B';
 }
+
+/// WhatsApp-style relative day formatting for the chat list preview
+/// (Batch 6b) — today: "3:41 PM", within the last 6 days: "Mon", older:
+/// "14/03/25".
+String formatChatTimestamp(DateTime dateTime) {
+  final now = DateTime.now();
+  final local = dateTime.toLocal();
+  final today = DateTime(now.year, now.month, now.day);
+  final date = DateTime(local.year, local.month, local.day);
+  final daysAgo = today.difference(date).inDays;
+
+  if (daysAgo == 0) {
+    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    final period = local.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
+  }
+  if (daysAgo < 7) {
+    const weekdays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return weekdays[local.weekday - 1];
+  }
+  final day = local.day.toString().padLeft(2, '0');
+  final month = local.month.toString().padLeft(2, '0');
+  final year = (local.year % 100).toString().padLeft(2, '0');
+  return '$day/$month/$year';
+}

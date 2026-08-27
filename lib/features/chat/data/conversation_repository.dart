@@ -2,6 +2,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/errors/failure.dart';
 import '../../../models/conversation.dart';
+import '../../../models/conversation_summary.dart';
+import '../../../models/message.dart';
 import '../../../models/profile.dart';
 
 /// Conversation creation/lookup per PRD.md section 5: "Starting a chat =
@@ -54,7 +56,6 @@ class ConversationRepository {
     String myId,
     String otherId,
   ) async {
-    // 1. All direct conversations I'm currently a member of.
     final myRows = await _client
         .from('conversation_members')
         .select('conversation_id, conversations!inner(type)')
@@ -65,7 +66,6 @@ class ConversationRepository {
         (myRows as List).map((r) => r['conversation_id'] as String).toList();
     if (myConversationIds.isEmpty) return null;
 
-    // 2. Of those, is the other user also a member of any of them?
     final match = await _client
         .from('conversation_members')
         .select('conversations!inner(*)')
@@ -89,9 +89,6 @@ class ConversationRepository {
 
     final conversationId = convRow['id'] as String;
 
-    // Direct chats have no admin concept — ERD.md's admin/member role
-    // only governs group member management (PRD.md section 6) — so
-    // both participants get 'member' here.
     await _client.from('conversation_members').insert([
       {'conversation_id': conversationId, 'user_id': myId, 'role': 'member'},
       {
@@ -116,6 +113,69 @@ class ConversationRepository {
           .maybeSingle();
       if (row == null) return null;
       return Conversation.fromJson(row);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Fetches every conversation [myId] is a member of, each paired
+  /// with the other participant (direct chats) and its most recent
+  /// message (chat list preview, Batch 6b). N+1 queries — one extra
+  /// round trip per conversation for its last message — acceptable at
+  /// this app's demo scale, same reasoning `MediaRepository
+  /// .resolveFileInfo`'s extra `list()` call already uses. PostgREST
+  /// embedding doesn't cleanly support order+limit-1 on a nested
+  /// resource, so this stays a plain two-step fetch instead of a
+  /// fragile embedded query.
+  Future<List<ConversationSummary>> fetchMyConversationSummaries(
+    String myId,
+  ) async {
+    try {
+      final memberRows = await _client
+          .from('conversation_members')
+          .select('conversations!inner(*)')
+          .eq('user_id', myId);
+
+      final conversations = (memberRows as List)
+          .map((r) =>
+              Conversation.fromJson(r['conversations'] as Map<String, dynamic>))
+          .toList();
+
+      final summaries = <ConversationSummary>[];
+      for (final conversation in conversations) {
+        Profile? otherProfile;
+        if (conversation.isDirect) {
+          otherProfile = await getOtherDirectMember(
+            conversationId: conversation.id,
+            myId: myId,
+          );
+        }
+
+        final lastMessageRow = await _client
+            .from('messages')
+            .select()
+            .eq('conversation_id', conversation.id)
+            .order('created_at', ascending: false)
+            .limit(1)
+            .maybeSingle();
+
+        summaries.add(ConversationSummary(
+          conversation: conversation,
+          otherProfile: otherProfile,
+          lastMessage:
+              lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
+        ));
+      }
+
+      // Most recently active conversation first — falls back to
+      // `conversations.created_at` for a chat with no messages yet.
+      summaries.sort((a, b) {
+        final aTime = a.lastMessage?.createdAt ?? a.conversation.createdAt;
+        final bTime = b.lastMessage?.createdAt ?? b.conversation.createdAt;
+        return bTime.compareTo(aTime);
+      });
+
+      return summaries;
     } on PostgrestException catch (e) {
       throw SupabaseFailure(e.message);
     }

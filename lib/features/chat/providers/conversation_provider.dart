@@ -5,6 +5,7 @@ import '../../../core/errors/failure.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../data/conversation_repository.dart';
 import '../../../models/conversation.dart';
+import '../../../models/conversation_summary.dart';
 
 final conversationRepositoryProvider = Provider<ConversationRepository>((ref) {
   return ConversationRepository(SupabaseConfig.client);
@@ -52,4 +53,25 @@ final conversationByIdProvider =
   return ref
       .read(conversationRepositoryProvider)
       .getConversation(conversationId);
+});
+
+/// Chat list data source (Batch 6b). FutureProvider, not
+/// StreamProvider — same join reasoning as `activeStoryGroupsProvider`
+/// (PostgREST embedding can't cleanly express "conversations + last
+/// message" as a single realtime-streamable query). Invalidated via
+/// pull-to-refresh on the chat list screen.
+///
+/// Known limitation, flagged rather than silently accepted: this list
+/// does NOT auto-reorder the instant a new message arrives elsewhere in
+/// the app — only on refresh/re-navigation. A realtime-perfect version
+/// would need a `.stream()`-based provider per conversation feeding a
+/// combined view, which is meaningfully more plumbing; deferred rather
+/// than built silently, matching Rule 1.
+final myConversationSummariesProvider =
+    FutureProvider<List<ConversationSummary>>((ref) async {
+  final myId = ref.watch(currentSessionProvider)?.user.id;
+  if (myId == null) return const [];
+  return ref
+      .read(conversationRepositoryProvider)
+      .fetchMyConversationSummaries(myId);
 });

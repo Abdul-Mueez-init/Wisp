@@ -4,23 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/theme/app_theme.dart';
-
-/// Language options aren't specified in PRD.md/ERD.md beyond
-/// "preferred_language, default 'en', editable in settings" — this is
-/// a reasonable starter list covering common cases for AI Feature 1
-/// (translation), not a locked design decision. Easy to extend later.
-const _languageOptions = <(String code, String label)>[
-  ('en', 'English'),
-  ('es', 'Spanish'),
-  ('fr', 'French'),
-  ('de', 'German'),
-  ('pt', 'Portuguese'),
-  ('ar', 'Arabic'),
-  ('hi', 'Hindi'),
-  ('ur', 'Urdu'),
-  ('zh', 'Chinese'),
-  ('ja', 'Japanese'),
-];
+import '../../../core/constants/language_options.dart';
 
 class OnboardingDetailsStep extends StatefulWidget {
   const OnboardingDetailsStep({
@@ -149,7 +133,7 @@ class _OnboardingDetailsStepState extends State<OnboardingDetailsStep> {
               style: Theme.of(context).textTheme.bodyLarge,
               icon: const Icon(Icons.keyboard_arrow_down,
                   color: AppColors.outline),
-              items: _languageOptions
+              items: languageOptions
                   .map((lang) =>
                       DropdownMenuItem(value: lang.$1, child: Text(lang.$2)))
                   .toList(),

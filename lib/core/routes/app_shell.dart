@@ -1,20 +1,19 @@
 // lib/core/routes/app_shell.dart
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../features/auth/providers/auth_provider.dart';
 import '../../features/chat/screens/chat_list_screen.dart';
-import '../../features/profile/providers/profile_provider.dart';
+import '../../features/profile/screens/profile_settings_screen.dart';
 import '../../features/stories/screens/status_list_screen.dart';
 import '../theme/app_theme.dart';
 
 /// Bottom-nav scaffold added in Batch 6b — per the Phase 6 handoff doc,
 /// both the chat list and the Status screen assumed a persistent
 /// bottom nav (Chats/Status/Calls/Settings) that didn't exist. Chats
-/// and Status are wired for real; Calls and Settings are deliberately
-/// thin "coming later" stubs, not full screens — per rules.md Rule 2,
-/// a stub that plainly says what's missing is fine, a fake populated
-/// screen isn't. Replaces the old bootstrap screen as the `/` route.
+/// and Status are wired for real; Settings is now real too (profile-
+/// settings gap fix — was a sign-out-only stub). Calls remains a
+/// deliberately thin "coming later" stub — per rules.md Rule 2, a stub
+/// that plainly says what's missing is fine, a fake populated screen
+/// isn't. Replaces the old bootstrap screen as the `/` route.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -29,7 +28,7 @@ class _AppShellState extends State<AppShell> {
     ChatListScreen(),
     StatusListScreen(),
     _CallsStubScreen(),
-    _SettingsStubScreen(),
+    ProfileSettingsScreen(),
   ];
 
   @override
@@ -84,58 +83,6 @@ class _CallsStubScreen extends StatelessWidget {
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.bodyMedium,
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Real (if minimal) functionality, not a fake screen — carries over
-/// the sign-out action the old bootstrap screen had, since replacing
-/// it with AppShell can't quietly drop the only way to sign out.
-/// design.md lists a full "Profile/Settings" Stitch screen as locked
-/// and safe to build against — this stub is a placeholder until that
-/// gets built out, not a redesign of it.
-class _SettingsStubScreen extends ConsumerWidget {
-  const _SettingsStubScreen();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final profileAsync = ref.watch(currentProfileProvider);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: Padding(
-        padding: const EdgeInsets.all(AppSpacing.pageMargin),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            profileAsync.when(
-              data: (p) => Text(
-                p != null ? '@${p.username}' : 'Not signed in',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              loading: () => const CircularProgressIndicator(strokeWidth: 2),
-              error: (e, _) =>
-                  Text('$e', style: const TextStyle(color: AppColors.error)),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Full profile & settings (avatar, display name, preferred '
-              'language) is one of design.md\'s locked screens, not yet '
-              'built out — coming with the rest of the settings work.',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
-            const Spacer(),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () =>
-                    ref.read(authControllerProvider.notifier).signOut(),
-                icon: const Icon(Icons.logout),
-                label: const Text('Sign out'),
-              ),
-            ),
-          ],
         ),
       ),
     );

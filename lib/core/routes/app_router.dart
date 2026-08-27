@@ -12,6 +12,7 @@ import '../../features/groups/screens/group_creation_screen.dart';
 import '../../features/groups/screens/group_members_screen.dart';
 import '../../features/profile/providers/profile_provider.dart';
 import '../../features/stories/screens/story_capture_screen.dart';
+import '../../features/stories/screens/story_viewer_screen.dart';
 import '../../models/conversation.dart';
 import '../../models/profile.dart';
 
@@ -94,6 +95,17 @@ final routerProvider = Provider<GoRouter>((ref) {
         // Batch 6b: launched from the Status tab's "My status" row.
         path: '/status/new',
         builder: (context, state) => const StoryCaptureScreen(),
+      ),
+      GoRoute(
+        // Batch 6c: fullscreen story viewer, opened from the Status tab.
+        path: '/status/view',
+        builder: (context, state) {
+          final args = state.extra as StoryViewerArgs;
+          return StoryViewerScreen(
+            groups: args.groups,
+            initialIndex: args.initialIndex,
+          );
+        },
       ),
     ],
   );

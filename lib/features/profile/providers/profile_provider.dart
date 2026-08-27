@@ -84,3 +84,52 @@ class OnboardingController extends AsyncNotifier<void> {
 
 final onboardingControllerProvider =
     AsyncNotifierProvider<OnboardingController, void>(OnboardingController.new);
+
+/// Settings-screen action: optional new avatar upload, then a
+/// `profiles` row update. Mirrors OnboardingController's shape.
+class UpdateProfileController extends AsyncNotifier<void> {
+  @override
+  Future<void> build() async {}
+
+  Future<bool> updateProfile({
+    String? displayName,
+    Uint8List? avatarBytes,
+    String? avatarExt,
+    String? preferredLanguage,
+  }) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      final session = ref.read(currentSessionProvider);
+      if (session == null) {
+        throw const AuthFailure('No authenticated session found.');
+      }
+      final repo = ref.read(profileRepositoryProvider);
+
+      String? avatarPath;
+      if (avatarBytes != null && avatarExt != null) {
+        avatarPath = await repo.uploadAvatar(
+          userId: session.user.id,
+          bytes: avatarBytes,
+          fileExt: avatarExt,
+        );
+      }
+
+      await repo.updateProfile(
+        userId: session.user.id,
+        displayName: displayName,
+        avatarPath: avatarPath,
+        preferredLanguage: preferredLanguage,
+      );
+
+      // Same reasoning as OnboardingController — invalidate so every
+      // watcher (Settings screen, chat bubbles showing my name, etc.)
+      // refetches with the new values.
+      ref.invalidate(currentProfileProvider);
+    });
+    return !state.hasError;
+  }
+}
+
+final updateProfileControllerProvider =
+    AsyncNotifierProvider<UpdateProfileController, void>(
+        UpdateProfileController.new);

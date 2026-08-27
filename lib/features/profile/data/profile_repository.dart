@@ -101,6 +101,50 @@ class ProfileRepository {
     }
   }
 
+  /// Updates the caller's own editable profile fields (Settings
+  /// screen). Only `display_name`, `preferred_language`, and
+  /// `avatar_url` are user-editable per design.md's Profile/Settings
+  /// screen. `username` is deliberately NOT editable here — PRD.md/
+  /// ERD.md never call out username changes, and it's the one field
+  /// discovery search (PRD.md section 5) depends on, so leaving it
+  /// fixed after onboarding avoids opening scope nobody asked for.
+  Future<Profile> updateProfile({
+    required String userId,
+    String? displayName,
+    String? avatarPath,
+    String? preferredLanguage,
+  }) async {
+    try {
+      final payload = <String, dynamic>{};
+      if (displayName != null) {
+        payload['display_name'] =
+            displayName.trim().isEmpty ? null : displayName.trim();
+      }
+      if (preferredLanguage != null) {
+        payload['preferred_language'] = preferredLanguage;
+      }
+      if (avatarPath != null) {
+        payload['avatar_url'] = avatarPath;
+      }
+      if (payload.isEmpty) {
+        final existing = await fetchProfile(userId);
+        if (existing == null) {
+          throw const SupabaseFailure('Profile not found.');
+        }
+        return existing;
+      }
+      final row = await _client
+          .from('profiles')
+          .update(payload)
+          .eq('id', userId)
+          .select()
+          .single();
+      return Profile.fromJson(row);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   /// Uploads avatar bytes and returns the storage PATH (per ERD.md:
   /// "avatar_url ... Supabase Storage path"), not a resolved URL.
   /// Callers resolve a displayable URL via [resolveAvatarUrl].

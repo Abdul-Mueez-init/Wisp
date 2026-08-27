@@ -10,12 +10,12 @@ import '../../auth/providers/auth_provider.dart';
 import '../../profile/providers/profile_provider.dart';
 import '../providers/story_provider.dart';
 import '../widgets/story_ring_avatar.dart';
+import 'story_viewer_screen.dart';
 
-/// Status tab (plan.md Phase 6, batch 6b). Per design.md's Stitch
+/// Status tab (plan.md Phase 6, batches 6b/6c). Per design.md's Stitch
 /// export, grouped into "My status" / "Recent updates" / "Viewed
-/// updates". Tapping another user's row would open the full-screen
-/// story viewer — that's 6c, not built yet, so rows are tappable but
-/// surface a plain "coming in 6c" notice rather than faking a viewer.
+/// updates". Tapping a row with a story now opens the fullscreen
+/// viewer (batch 6c) instead of the 6b placeholder snackbar.
 class StatusListScreen extends ConsumerWidget {
   const StatusListScreen({super.key});
 
@@ -58,11 +58,13 @@ class StatusListScreen extends ConsumerWidget {
                 _MyStatusTile(group: myGroup),
                 if (unviewed.isNotEmpty) ...[
                   const _SectionLabel('Recent updates'),
-                  for (final g in unviewed) _StatusTile(group: g),
+                  for (final g in unviewed)
+                    _StatusTile(group: g, allGroups: others),
                 ],
                 if (viewed.isNotEmpty) ...[
                   const _SectionLabel('Viewed updates'),
-                  for (final g in viewed) _StatusTile(group: g),
+                  for (final g in viewed)
+                    _StatusTile(group: g, allGroups: others),
                 ],
                 if (others.isEmpty && myGroup == null)
                   Padding(
@@ -111,10 +113,16 @@ class _MyStatusTile extends ConsumerWidget {
                 hasUnviewed: hasStory && !group!.allViewed,
                 fallbackLabel: myProfile?.displayName ?? myProfile?.username,
               ),
-              if (!hasStory)
-                Positioned(
-                  right: -2,
-                  bottom: -2,
+              // Batch 6c fix: this used to only render when there was
+              // no story yet, leaving no real way to post a second one
+              // (the subtitle said "tap to add another" but the tile's
+              // only onTap now correctly opens the viewer). It's its
+              // own tap target now, always present, same as WhatsApp.
+              Positioned(
+                right: -2,
+                bottom: -2,
+                child: GestureDetector(
+                  onTap: () => context.push('/status/new'),
                   child: Container(
                     width: 20,
                     height: 20,
@@ -126,15 +134,26 @@ class _MyStatusTile extends ConsumerWidget {
                         const Icon(Icons.add, size: 14, color: AppColors.cream),
                   ),
                 ),
+              ),
             ],
           ),
           title: const Text('My status'),
           subtitle: Text(
             hasStory
-                ? '${group!.stories.length} update${group!.stories.length > 1 ? 's' : ''} · tap to add another'
+                ? '${group!.stories.length} update${group!.stories.length > 1 ? 's' : ''} · tap to view'
                 : 'Tap to add a status update',
           ),
-          onTap: () => context.push('/status/new'),
+          onTap: () async {
+            if (!hasStory) {
+              context.push('/status/new');
+              return;
+            }
+            await context.push(
+              '/status/view',
+              extra: StoryViewerArgs(groups: [group!], initialIndex: 0),
+            );
+            ref.invalidate(activeStoryGroupsProvider);
+          },
         );
       },
     );
@@ -142,8 +161,9 @@ class _MyStatusTile extends ConsumerWidget {
 }
 
 class _StatusTile extends ConsumerWidget {
-  const _StatusTile({required this.group});
+  const _StatusTile({required this.group, required this.allGroups});
   final StoryGroup group;
+  final List<StoryGroup> allGroups;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -170,12 +190,16 @@ class _StatusTile extends ConsumerWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
-      onTap: () {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Full story viewer is coming in batch 6c.'),
-          ),
+      onTap: () async {
+        // Pass the full "others" list so a horizontal swipe inside the
+        // viewer moves between authors, starting on the one tapped.
+        final index = allGroups.indexOf(group);
+        await context.push(
+          '/status/view',
+          extra: StoryViewerArgs(
+              groups: allGroups, initialIndex: index < 0 ? 0 : index),
         );
+        ref.invalidate(activeStoryGroupsProvider);
       },
     );
   }

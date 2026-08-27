@@ -33,3 +33,15 @@ String formatChatTimestamp(DateTime dateTime) {
   final year = (local.year % 100).toString().padLeft(2, '0');
   return '$day/$month/$year';
 }
+
+/// Short relative-time label for content that's always < 24h old
+/// (stories) — "Just now" / "5m ago" / "3h ago". Falls back to
+/// [formatChatTimestamp] past 24h as a defensive case only — a story
+/// should never actually reach that age given client-side expiry.
+String formatRelativeShort(DateTime dateTime) {
+  final diff = DateTime.now().difference(dateTime.toLocal());
+  if (diff.inSeconds < 60) return 'Just now';
+  if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+  if (diff.inHours < 24) return '${diff.inHours}h ago';
+  return formatChatTimestamp(dateTime);
+}

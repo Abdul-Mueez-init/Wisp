@@ -1,6 +1,7 @@
 // lib/features/chat/data/media_repository.dart
 import 'dart:typed_data';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/errors/failure.dart';
@@ -85,8 +86,17 @@ class MediaRepository {
       final folder = segments.join('/');
       final listing = await _client.storage.from(bucket).list(path: folder);
       final match = listing.where((f) => f.name == fileName);
-      final sizeBytes =
-          match.isNotEmpty ? match.first.metadata?['size'] as int? : null;
+
+      int? sizeBytes;
+      if (match.isNotEmpty) {
+        final rawSize = match.first.metadata?['size'];
+        if (rawSize is int) {
+          sizeBytes = rawSize;
+        } else if (rawSize is num) {
+          sizeBytes = rawSize.toInt();
+        }
+      }
+
       final url =
           await _client.storage.from(bucket).createSignedUrl(path, 3600);
       return MediaFileInfo(
@@ -149,3 +159,7 @@ class MediaFileInfo {
   final String fileName;
   final int? sizeBytes;
 }
+
+final mediaRepositoryProvider = Provider<MediaRepository>((ref) {
+  return MediaRepository(Supabase.instance.client);
+});

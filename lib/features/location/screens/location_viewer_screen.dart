@@ -44,8 +44,11 @@ class LocationViewerScreen extends StatelessWidget {
                 point: point,
                 width: 40,
                 height: 40,
-                child: const Icon(Icons.location_on,
-                    color: AppColors.primary, size: 40),
+                child: const Icon(
+                  Icons.location_on,
+                  color: AppColors.primary,
+                  size: 40,
+                ),
               ),
             ],
           ),

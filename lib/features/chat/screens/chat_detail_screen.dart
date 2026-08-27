@@ -58,11 +58,14 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     await repo.markRead(conversationId: widget.conversationId, myId: myId);
   }
 
-    @override
+  @override
   void dispose() {
-    ref.read(typingControllerProvider.notifier).stopTyping(widget.conversationId);
+    ref
+        .read(typingControllerProvider.notifier)
+        .stopTyping(widget.conversationId);
     final liveState = ref.read(liveLocationControllerProvider);
-    if (liveState.isActive && liveState.conversationId == widget.conversationId) {
+    if (liveState.isActive &&
+        liveState.conversationId == widget.conversationId) {
       ref.read(liveLocationControllerProvider.notifier).stop();
     }
     super.dispose();
@@ -196,43 +199,6 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                   ],
-                    if (sharingLiveHere)
-            Container(
-              width: double.infinity,
-              color: AppColors.primaryContainer,
-              padding: const EdgeInsets.symmetric(
-                horizontal: AppSpacing.pageMargin, vertical: 8),
-              child: Row(
-                children: [
-                  const Icon(Icons.location_on, size: 16, color: AppColors.cream),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Sharing live location',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelMedium
-                          ?.copyWith(color: AppColors.cream),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () =>
-                        ref.read(liveLocationControllerProvider.notifier).stop(),
-                    child: const Text('Stop', style: TextStyle(color: AppColors.cream)),
-                  ),
-                ],
-              ),
-            ),
-          ChatInputBar(
-            ...
-            onSendCurrentLocation: () => _sendMedia(
-              () => ref
-                  .read(sendLocationControllerProvider.notifier)
-                  .sendCurrentLocation(conversationId: widget.conversationId),
-              readError: () => ref.read(sendLocationControllerProvider).error,
-            ),
-            onStartLiveLocation: (duration) => _startLiveLocation(duration),
-          ),
                 ),
               ),
               if (isGroup)
@@ -297,6 +263,36 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
               ),
             ),
           ),
+          if (sharingLiveHere)
+            Container(
+              width: double.infinity,
+              color: AppColors.primaryContainer,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.pageMargin, vertical: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.location_on,
+                      size: 16, color: AppColors.cream),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Sharing live location',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelMedium
+                          ?.copyWith(color: AppColors.cream),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => ref
+                        .read(liveLocationControllerProvider.notifier)
+                        .stop(),
+                    child: const Text('Stop',
+                        style: TextStyle(color: AppColors.cream)),
+                  ),
+                ],
+              ),
+            ),
           ChatInputBar(
             sending: sending,
             uploadingMedia: uploadingMedia,
@@ -356,6 +352,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                   .sendCurrentLocation(conversationId: widget.conversationId),
               readError: () => ref.read(sendLocationControllerProvider).error,
             ),
+            onStartLiveLocation: _startLiveLocation,
           ),
         ],
       ),
@@ -383,7 +380,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     }
   }
 
-    Future<void> _startLiveLocation(LiveLocationDuration duration) async {
+  Future<void> _startLiveLocation(LiveLocationDuration duration) async {
     final ok = await ref
         .read(liveLocationControllerProvider.notifier)
         .start(conversationId: widget.conversationId, duration: duration);

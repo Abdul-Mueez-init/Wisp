@@ -37,11 +37,10 @@ class ChatInputBar extends ConsumerStatefulWidget {
     required this.onSendVoice,
     required this.onShareContact,
     required this.onSendCurrentLocation,
+    required this.onStartLiveLocation,
     required this.uploadingMedia,
     this.onTextChanged,
   });
-  ...
-  final Future<void> Function() onSendCurrentLocation;
 
   final void Function(String text) onSend;
   final bool sending;
@@ -52,7 +51,8 @@ class ChatInputBar extends ConsumerStatefulWidget {
   final Future<void> Function(Uint8List bytes) onSendVoice;
   final Future<void> Function(Profile profile) onShareContact;
   final Future<void> Function() onSendCurrentLocation;
-  final Future<void> Function(LiveLocationDuration duration) onStartLiveLocation;
+  final Future<void> Function(LiveLocationDuration duration)
+      onStartLiveLocation;
 
   /// True while an attachment is uploading — disables "+" and voice
   /// recording so a second upload can't be queued mid-flight (no
@@ -145,10 +145,12 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
               onTap: () => Navigator.of(context).pop(_AttachmentChoice.contact),
             ),
             const SizedBox(height: 8),
-                                   ListTile(
-              leading: const Icon(Icons.location_on_outlined, color: AppColors.primary),
+            ListTile(
+              leading: const Icon(Icons.location_on_outlined,
+                  color: AppColors.primary),
               title: const Text('Location'),
-              onTap: () => Navigator.of(context).pop(_AttachmentChoice.location),
+              onTap: () =>
+                  Navigator.of(context).pop(_AttachmentChoice.location),
             ),
           ],
         ),
@@ -169,7 +171,7 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
         await _pickAndSendDocument();
       case _AttachmentChoice.contact:
         await _pickAndShareContact();
-              case _AttachmentChoice.location:
+      case _AttachmentChoice.location:
         await _openLocationSheet();
     }
   }
@@ -215,7 +217,7 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
     await widget.onShareContact(profile);
   }
 
-    Future<void> _openLocationSheet() async {
+  Future<void> _openLocationSheet() async {
     final choice = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: AppColors.surfaceContainer,
@@ -228,13 +230,15 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
           children: [
             const SizedBox(height: 12),
             ListTile(
-              leading: const Icon(Icons.location_on_outlined, color: AppColors.primary),
+              leading: const Icon(Icons.location_on_outlined,
+                  color: AppColors.primary),
               title: const Text('Current location'),
               subtitle: const Text('Send your location once'),
               onTap: () => Navigator.of(context).pop('current'),
             ),
             ListTile(
-              leading: const Icon(Icons.location_history_outlined, color: AppColors.primary),
+              leading: const Icon(Icons.location_history_outlined,
+                  color: AppColors.primary),
               title: const Text('Live location'),
               subtitle: const Text('Share your location as you move'),
               onTap: () => Navigator.of(context).pop('live'),
@@ -271,7 +275,8 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
             const SizedBox(height: 8),
             for (final option in LiveLocationDuration.values)
               ListTile(
-                leading: const Icon(Icons.timer_outlined, color: AppColors.primary),
+                leading:
+                    const Icon(Icons.timer_outlined, color: AppColors.primary),
                 title: Text(option.label),
                 onTap: () => Navigator.of(context).pop(option),
               ),

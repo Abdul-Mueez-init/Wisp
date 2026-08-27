@@ -1,6 +1,7 @@
 // lib/features/location/data/location_repository.dart
 import 'dart:convert';
 
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 
@@ -126,3 +127,7 @@ class LocationRepository {
     _lastRequestAt = DateTime.now();
   }
 }
+
+final locationRepositoryProvider = Provider<LocationRepository>((ref) {
+  return LocationRepository(http.Client());
+});

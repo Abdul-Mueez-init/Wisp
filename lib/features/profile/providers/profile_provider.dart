@@ -1,3 +1,4 @@
+// lib/features/profile/providers/profile_provider.dart
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -21,6 +22,15 @@ final currentProfileProvider =
   final session = ref.watch(currentSessionProvider);
   if (session == null) return null;
   return ref.read(profileRepositoryProvider).fetchProfile(session.user.id);
+});
+
+/// Batch 5d — looks up any user's profile by id, used to render
+/// shared-contact message bubbles where only `shared_contact_id` is
+/// known (not a full Profile, unlike [otherDirectMemberProvider]'s
+/// `extra`-passed case).
+final profileByIdProvider =
+    FutureProvider.family<Profile?, String>((ref, userId) {
+  return ref.read(profileRepositoryProvider).fetchProfile(userId);
 });
 
 /// Handles the final onboarding submission: optional avatar upload,

@@ -1,3 +1,4 @@
+// lib/features/chat/providers/message_provider.dart
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -41,7 +42,7 @@ final otherDirectMemberProvider =
       );
 });
 
-/// Lightweight — URL only. Used by image/video bubbles.
+/// Lightweight — URL only. Used by image/video/voice bubbles.
 final mediaSignedUrlProvider =
     FutureProvider.family<String, String>((ref, mediaPath) {
   return ref.watch(mediaRepositoryProvider).resolveSignedUrl(mediaPath);
@@ -72,6 +73,30 @@ class SendMessageController extends AsyncNotifier<void> {
           ),
     );
   }
+
+  /// Batch 5d — no upload involved (unlike image/video/document/voice),
+  /// so this lives alongside [sendText] rather than in
+  /// `SendMediaMessageController`. Returns `bool` (unlike [sendText])
+  /// so `chat_detail_screen.dart` can reuse its existing media-style
+  /// error-surfacing wrapper for the attachment-sheet flow it's
+  /// triggered from.
+  Future<bool> sendContact({
+    required String conversationId,
+    required String sharedContactId,
+  }) async {
+    final myId = ref.read(currentSessionProvider)?.user.id;
+    if (myId == null) return false;
+    state = const AsyncLoading();
+    final result = await AsyncValue.guard(
+      () => ref.read(messageRepositoryProvider).sendContactMessage(
+            conversationId: conversationId,
+            senderId: myId,
+            sharedContactId: sharedContactId,
+          ),
+    );
+    state = result;
+    return !result.hasError;
+  }
 }
 
 final sendMessageControllerProvider =
@@ -79,11 +104,11 @@ final sendMessageControllerProvider =
   SendMessageController.new,
 );
 
-/// Phase 5 — send an image/video/document message: upload bytes to
-/// `chat-media`, then insert the `messages` row referencing the
+/// Phase 5 — send an image/video/document/voice message: upload bytes
+/// to `chat-media`, then insert the `messages` row referencing the
 /// resulting path. Every `send*` method returns `false` (leaving a
 /// real error in `state`) rather than silently no-oping on failure.
-/// The three public methods are thin wrappers around one shared
+/// The four public methods are thin wrappers around one shared
 /// `_sendMedia` so the upload-cap-check → upload → insert flow isn't
 /// duplicated per type.
 class SendMediaMessageController extends AsyncNotifier<void> {
@@ -124,9 +149,6 @@ class SendMediaMessageController extends AsyncNotifier<void> {
     );
   }
 
-  /// [fileName] here is the user's real filename (from the file
-  /// picker) — unlike image/video, which use a fixed generic name. See
-  /// MediaRepository's doc comment for why the path carries it.
   Future<bool> sendDocument({
     required String conversationId,
     required Uint8List bytes,
@@ -141,6 +163,20 @@ class SendMediaMessageController extends AsyncNotifier<void> {
       maxBytes: MediaRepository.maxDocumentBytes,
       maxBytesLabel: '25MB',
       caption: caption,
+    );
+  }
+
+  Future<bool> sendVoice({
+    required String conversationId,
+    required Uint8List bytes,
+  }) {
+    return _sendMedia(
+      conversationId: conversationId,
+      bytes: bytes,
+      fileName: 'voice.m4a',
+      type: 'voice',
+      maxBytes: MediaRepository.maxVoiceBytes,
+      maxBytesLabel: '10MB',
     );
   }
 
@@ -194,6 +230,8 @@ class SendMediaMessageController extends AsyncNotifier<void> {
         return 'Video';
       case 'document':
         return 'Document';
+      case 'voice':
+        return 'Voice note';
       default:
         return 'Image';
     }

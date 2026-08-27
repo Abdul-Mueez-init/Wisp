@@ -1,10 +1,16 @@
+// lib/features/chat/widgets/message_bubble.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/format_utils.dart';
 import '../../../models/message.dart';
+import '../../../models/profile.dart';
+import '../../profile/providers/profile_provider.dart';
+import '../../voice_notes/widgets/voice_note_bubble.dart';
+import '../providers/conversation_provider.dart';
 import '../providers/message_provider.dart';
 import 'video_player_view.dart';
 
@@ -12,11 +18,10 @@ import 'video_player_view.dart';
 /// Cream text, right-aligned, 14px radius with a 4px "tail" corner;
 /// Received = Surface-Raised bg, left-aligned, same shape.
 ///
-/// Batch 5a/5b: 'text', 'image', 'video', 'document' render fully.
-/// 'voice', 'contact', and the two 'location_*' types render as a
-/// neutral placeholder until their own batches (5c–5e per the Phase 5
-/// handoff doc) ship — this is the agreed build sequence, not a
-/// shortcut.
+/// Batch 5a/5b/5c/5d: 'text', 'image', 'video', 'document', 'voice',
+/// 'contact' render fully. The two 'location_*' types render as a
+/// neutral placeholder until Batch 5e ships — the agreed build
+/// sequence, not a shortcut.
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
     super.key,
@@ -129,9 +134,10 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  /// 'text', 'document', plus every not-yet-implemented type's
-  /// placeholder. Image/video are handled separately above since they
-  /// need the clipped, edge-to-edge bubble treatment.
+  /// 'text', 'document', 'voice', 'contact', plus the not-yet-
+  /// implemented location placeholder. Image/video are handled
+  /// separately above since they need the clipped, edge-to-edge bubble
+  /// treatment.
   Widget _standardContent(BuildContext context) {
     if (message.type == 'text') {
       return Column(
@@ -163,6 +169,14 @@ class MessageBubble extends StatelessWidget {
       return _DocumentBubbleContent(message: message, isMine: isMine);
     }
 
+    if (message.type == 'voice') {
+      return VoiceNoteBubble(message: message, isMine: isMine);
+    }
+
+    if (message.type == 'contact') {
+      return _ContactBubbleContent(message: message, isMine: isMine);
+    }
+
     final placeholder = _placeholderFor(message.type);
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -183,10 +197,6 @@ class MessageBubble extends StatelessWidget {
 
   (IconData, String) _placeholderFor(String type) {
     switch (type) {
-      case 'voice':
-        return (Icons.mic_none_outlined, 'Voice note — coming in Batch 5c');
-      case 'contact':
-        return (Icons.person_outline, 'Contact — coming in Batch 5d');
       case 'location_current':
       case 'location_live':
         return (Icons.location_on_outlined, 'Location — coming in Batch 5e');
@@ -475,6 +485,135 @@ class _DocumentBubbleContent extends ConsumerWidget {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Could not open document.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
+}
+
+/// Batch 5d — contact-share bubble: avatar, @username, display name,
+/// tap opens/starts a direct chat with that user (same
+/// `startConversationControllerProvider` flow as tapping a search
+/// result in `UserSearchScreen`). Avatar resolves via the public
+/// `avatars` bucket (synchronous `getPublicUrl`, unlike chat-media's
+/// signed-URL flow) since that bucket is public per architecture.md.
+class _ContactBubbleContent extends ConsumerWidget {
+  const _ContactBubbleContent({required this.message, required this.isMine});
+
+  final Message message;
+  final bool isMine;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final contactId = message.sharedContactId;
+    final textColor = isMine ? AppColors.cream : AppColors.onSurface;
+
+    if (contactId == null) {
+      return Text(
+        'Contact unavailable',
+        style:
+            Theme.of(context).textTheme.bodyMedium?.copyWith(color: textColor),
+      );
+    }
+
+    final profileAsync = ref.watch(profileByIdProvider(contactId));
+
+    return profileAsync.when(
+      data: (profile) {
+        if (profile == null) {
+          return Text(
+            'Contact no longer available',
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(color: textColor),
+          );
+        }
+        final nameForInitial = profile.displayName?.isNotEmpty == true
+            ? profile.displayName!
+            : profile.username;
+        final avatarUrl = profile.avatarUrl != null
+            ? ref
+                .read(profileRepositoryProvider)
+                .resolveAvatarUrl(profile.avatarUrl!)
+            : null;
+
+        return InkWell(
+          onTap: () => _openContact(context, ref, profile),
+          borderRadius: BorderRadius.circular(AppRadius.md),
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 20,
+                backgroundColor: AppColors.surfaceContainerHigh,
+                backgroundImage:
+                    avatarUrl != null ? NetworkImage(avatarUrl) : null,
+                child: avatarUrl == null
+                    ? Text(
+                        nameForInitial.substring(0, 1).toUpperCase(),
+                        style: const TextStyle(color: AppColors.primary),
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '@${profile.username}',
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodyLarge
+                          ?.copyWith(color: textColor),
+                    ),
+                    if (profile.displayName != null)
+                      Text(
+                        profile.displayName!,
+                        style:
+                            Theme.of(context).textTheme.labelMedium?.copyWith(
+                                  color: isMine
+                                      ? AppColors.cream.withValues(alpha: 0.7)
+                                      : AppColors.onSurfaceVariant,
+                                ),
+                      ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, color: textColor),
+            ],
+          ),
+        );
+      },
+      loading: () => const SizedBox(
+        height: 40,
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      ),
+      error: (e, _) => Text(
+        'Could not load contact',
+        style:
+            Theme.of(context).textTheme.bodyMedium?.copyWith(color: textColor),
+      ),
+    );
+  }
+
+  Future<void> _openContact(
+    BuildContext context,
+    WidgetRef ref,
+    Profile profile,
+  ) async {
+    final conversationId = await ref
+        .read(startConversationControllerProvider.notifier)
+        .startDirectConversationWith(profile.id);
+    if (!context.mounted) return;
+    if (conversationId != null) {
+      context.push('/chat/$conversationId', extra: profile);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not open chat.'),
           backgroundColor: AppColors.error,
         ),
       );

@@ -294,6 +294,21 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                     fileName: fileName,
                   ),
             ),
+            onSendVoice: (bytes) => _sendMedia(
+              () => ref
+                  .read(sendMediaMessageControllerProvider.notifier)
+                  .sendVoice(
+                    conversationId: widget.conversationId,
+                    bytes: bytes,
+                  ),
+            ),
+            onShareContact: (profile) => _sendMedia(
+              () =>
+                  ref.read(sendMessageControllerProvider.notifier).sendContact(
+                        conversationId: widget.conversationId,
+                        sharedContactId: profile.id,
+                      ),
+            ),
           ),
         ],
       ),

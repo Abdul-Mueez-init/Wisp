@@ -1,3 +1,4 @@
+// lib/features/chat/data/media_repository.dart
 import 'dart:typed_data';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -21,6 +22,9 @@ class MediaRepository {
   static const maxImageBytes = 8 * 1024 * 1024; // 8MB
   static const maxVideoBytes = 50 * 1024 * 1024; // 50MB
   static const maxDocumentBytes = 25 * 1024 * 1024; // 25MB
+  /// Batch 5c — generous relative to actual size: a 64kbps mono AAC
+  /// recording this size would run ~20+ minutes.
+  static const maxVoiceBytes = 10 * 1024 * 1024; // 10MB
 
   /// Path convention per architecture.md:
   /// `{conversation_id}/{message_id}/{filename}`. [messageId] is
@@ -54,8 +58,8 @@ class MediaRepository {
     }
   }
 
-  /// Signed URL only — use for images/video where the UI doesn't need
-  /// to show a filename or size.
+  /// Signed URL only — use for images/video/voice where the UI doesn't
+  /// need to show a filename or size.
   Future<String> resolveSignedUrl(
     String path, {
     int expiresInSeconds = 3600,
@@ -103,7 +107,8 @@ class MediaRepository {
 
   /// Best-effort content type from extension, so a downloaded file
   /// opens correctly instead of as generic `application/octet-stream`.
-  /// Not exhaustive — just what this app's pickers can produce.
+  /// Not exhaustive — just what this app's pickers/recorder can
+  /// produce. 'm4a'/'aac' added in Batch 5c for voice notes.
   String? _guessContentType(String fileName) {
     final ext =
         fileName.contains('.') ? fileName.split('.').last.toLowerCase() : '';
@@ -126,6 +131,8 @@ class MediaRepository {
           'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       'txt': 'text/plain',
       'csv': 'text/csv',
+      'm4a': 'audio/m4a',
+      'aac': 'audio/aac',
     };
     return map[ext];
   }

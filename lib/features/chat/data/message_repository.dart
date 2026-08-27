@@ -1,3 +1,4 @@
+// lib/features/chat/data/message_repository.dart
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/errors/failure.dart';
@@ -55,13 +56,12 @@ class MessageRepository {
     }
   }
 
-  /// Generic media-message insert — covers 'image' now (Batch 5a) and
-  /// 'video'/'document' from Batch 5b on, since all three share the
-  /// same shape: a storage path in `media_url`, an optional caption in
-  /// `content`. [messageId] is generated client-side by the caller so
-  /// it can be reused as the storage path segment (see
-  /// MediaRepository) — inserted explicitly instead of relying on the
-  /// column default.
+  /// Generic media-message insert — covers 'image'/'video'/'document'/
+  /// 'voice', all sharing the same shape: a storage path in
+  /// `media_url`, an optional caption in `content`. [messageId] is
+  /// generated client-side by the caller so it can be reused as the
+  /// storage path segment (see MediaRepository) — inserted explicitly
+  /// instead of relying on the column default.
   Future<void> sendMediaMessage({
     required String messageId,
     required String conversationId,
@@ -79,6 +79,27 @@ class MessageRepository {
         'type': type,
         'content': (trimmedCaption?.isEmpty ?? true) ? null : trimmedCaption,
         'media_url': mediaPath,
+      });
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Batch 5d — shares another Wisp user's profile as a message. Per
+  /// PRD.md section 7, no caption/upload involved: just a `type:
+  /// 'contact'` row pointing at `shared_contact_id`, exactly as
+  /// ERD.md already models it.
+  Future<void> sendContactMessage({
+    required String conversationId,
+    required String senderId,
+    required String sharedContactId,
+  }) async {
+    try {
+      await _client.from('messages').insert({
+        'conversation_id': conversationId,
+        'sender_id': senderId,
+        'type': 'contact',
+        'shared_contact_id': sharedContactId,
       });
     } on PostgrestException catch (e) {
       throw SupabaseFailure(e.message);

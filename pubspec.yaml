@@ -37,6 +37,9 @@ dependencies:
   video_player: ^2.9.2     # NEW — Batch 5b: video playback
   url_launcher: ^6.3.1     # NEW — Batch 5b: open/download documents
 
+  record: ^5.2.1            # NEW — Batch 5c: voice note recording
+  just_audio: ^0.9.42       # NEW — Batch 5c: voice note playback
+
 
 dev_dependencies:
   flutter_test:

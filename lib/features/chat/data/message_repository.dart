@@ -106,6 +106,87 @@ class MessageRepository {
     }
   }
 
+  /// Batch 5e-i — shares a single current-location pin. Live location
+  /// ('location_live', `is_live_location`, `live_location_expires_at`)
+  /// lands in Batch 5e-ii — deliberately not touched here.
+  Future<void> sendLocationMessage({
+    required String conversationId,
+    required String senderId,
+    required double lat,
+    required double lng,
+  }) async {
+    try {
+      await _client.from('messages').insert({
+        'conversation_id': conversationId,
+        'sender_id': senderId,
+        'type': 'location_current',
+        'location_lat': lat,
+        'location_lng': lng,
+      });
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Batch 5e-ii — starts a live-location share: a 'location_live' row
+  /// with `is_live_location` true and `live_location_expires_at` set.
+  /// [messageId] is client-generated (uuid) so later position updates
+  /// and early-stop calls can target this exact row — same reasoning
+  /// as `sendMediaMessage`'s client-generated id.
+  Future<void> sendLiveLocationMessage({
+    required String messageId,
+    required String conversationId,
+    required String senderId,
+    required double lat,
+    required double lng,
+    required DateTime expiresAt,
+  }) async {
+    try {
+      await _client.from('messages').insert({
+        'id': messageId,
+        'conversation_id': conversationId,
+        'sender_id': senderId,
+        'type': 'location_live',
+        'location_lat': lat,
+        'location_lng': lng,
+        'is_live_location': true,
+        'live_location_expires_at': expiresAt.toIso8601String(),
+      });
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Updates the pin on an existing live-location message as the
+  /// sender's position changes. Requires `messages_update_own` RLS
+  /// (see migration note above).
+  Future<void> updateLiveLocationPin({
+    required String messageId,
+    required double lat,
+    required double lng,
+  }) async {
+    try {
+      await _client.from('messages').update(
+          {'location_lat': lat, 'location_lng': lng}).eq('id', messageId);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Lets the sender end a share early by setting the expiry to now —
+  /// every viewer's client-side expiry check (5e-i decision #4) then
+  /// flips it to "ended" on the next read, no separate 'stopped'
+  /// state needed in ERD.md.
+  Future<void> endLiveLocationEarly(String messageId) async {
+    try {
+      await _client.from('messages').update({
+        'live_location_expires_at': DateTime.now().toIso8601String()
+      }).eq('id', messageId);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   /// Inserts a 'delivered' `message_status` row (as the recipient
   /// themselves — required by the `message_status_insert_own` RLS
   /// policy) for any message in [conversationId] not sent by [myId]

@@ -25,6 +25,13 @@ class ValidationFailure extends Failure {
   const ValidationFailure(super.message);
 }
 
+/// Batch 5e — permission-denied, service-disabled, or fetch-timeout
+/// cases from LocationRepository, surfaced with a user-facing message
+/// rather than a raw geolocator exception reaching the UI.
+class LocationFailure extends Failure {
+  const LocationFailure(super.message);
+}
+
 /// Lightweight Result wrapper so providers can return either a value
 /// or a Failure without throwing raw exceptions into the UI layer.
 sealed class Result<T> {

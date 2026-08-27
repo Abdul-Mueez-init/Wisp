@@ -40,6 +40,9 @@ dependencies:
   record: ^5.2.1            # NEW — Batch 5c: voice note recording
   just_audio: ^0.9.42       # NEW — Batch 5c: voice note playback
 
+geolocator: ^13.0.2       # NEW — Batch 5e: current + live location
+flutter_map: ^7.0.2       # NEW — Batch 5e: OSM map rendering (zero-cost stack, no Google Maps billing)
+latlong2: ^0.9.1          # NEW — Batch 5e: flutter_map's LatLng type
 
 dev_dependencies:
   flutter_test:

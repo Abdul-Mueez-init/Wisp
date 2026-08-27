@@ -14,6 +14,8 @@ import '../providers/presence_provider.dart';
 import '../providers/typing_provider.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
+import '../../location/providers/location_provider.dart';
+import '../../location/providers/live_location_provider.dart';
 
 /// Phase 2 1-on-1 chat core, extended in Phase 3 to also render group
 /// conversations (plan.md: "Group chat detail screen (reuses chat core
@@ -56,14 +58,13 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     await repo.markRead(conversationId: widget.conversationId, myId: myId);
   }
 
-  @override
+    @override
   void dispose() {
-    // Best-effort — clear our own typing row so we don't leave a stale
-    // "typing…" showing for the other participant(s) after navigating
-    // away (Phase 4).
-    ref
-        .read(typingControllerProvider.notifier)
-        .stopTyping(widget.conversationId);
+    ref.read(typingControllerProvider.notifier).stopTyping(widget.conversationId);
+    final liveState = ref.read(liveLocationControllerProvider);
+    if (liveState.isActive && liveState.conversationId == widget.conversationId) {
+      ref.read(liveLocationControllerProvider.notifier).stop();
+    }
     super.dispose();
   }
 
@@ -74,9 +75,12 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
         ref.watch(messagesStreamProvider(widget.conversationId));
     final statusesAsync = ref.watch(messageStatusesStreamProvider);
     final sending = ref.watch(sendMessageControllerProvider).isLoading;
+    final liveLocationState = ref.watch(liveLocationControllerProvider);
+    final sharingLiveHere = liveLocationState.isActive &&
+        liveLocationState.conversationId == widget.conversationId;
     final uploadingMedia =
-        ref.watch(sendMediaMessageControllerProvider).isLoading;
-
+        ref.watch(sendMediaMessageControllerProvider).isLoading ||
+            ref.watch(sendLocationControllerProvider).isLoading;
     // Only fetch the conversation row when we weren't handed one via
     // `extra` (e.g. a deep link straight into a group chat).
     final needsConversationFetch =
@@ -192,6 +196,43 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                         overflow: TextOverflow.ellipsis,
                       ),
                   ],
+                    if (sharingLiveHere)
+            Container(
+              width: double.infinity,
+              color: AppColors.primaryContainer,
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.pageMargin, vertical: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.location_on, size: 16, color: AppColors.cream),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Sharing live location',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelMedium
+                          ?.copyWith(color: AppColors.cream),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () =>
+                        ref.read(liveLocationControllerProvider.notifier).stop(),
+                    child: const Text('Stop', style: TextStyle(color: AppColors.cream)),
+                  ),
+                ],
+              ),
+            ),
+          ChatInputBar(
+            ...
+            onSendCurrentLocation: () => _sendMedia(
+              () => ref
+                  .read(sendLocationControllerProvider.notifier)
+                  .sendCurrentLocation(conversationId: widget.conversationId),
+              readError: () => ref.read(sendLocationControllerProvider).error,
+            ),
+            onStartLiveLocation: (duration) => _startLiveLocation(duration),
+          ),
                 ),
               ),
               if (isGroup)
@@ -309,6 +350,12 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                         sharedContactId: profile.id,
                       ),
             ),
+            onSendCurrentLocation: () => _sendMedia(
+              () => ref
+                  .read(sendLocationControllerProvider.notifier)
+                  .sendCurrentLocation(conversationId: widget.conversationId),
+              readError: () => ref.read(sendLocationControllerProvider).error,
+            ),
           ),
         ],
       ),
@@ -318,13 +365,32 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   /// Shared error-surfacing wrapper for every Phase 5 media send —
   /// avoids repeating "await, check ok, read error, show snackbar"
   /// three times over (image/video/document).
-  Future<void> _sendMedia(Future<bool> Function() send) async {
+  Future<void> _sendMedia(
+    Future<bool> Function() send, {
+    Object? Function()? readError,
+  }) async {
     final ok = await send();
     if (!ok && mounted) {
-      final error = ref.read(sendMediaMessageControllerProvider).error;
+      final error = readError != null
+          ? readError()
+          : ref.read(sendMediaMessageControllerProvider).error;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(error?.toString() ?? 'Could not send attachment.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
+
+    Future<void> _startLiveLocation(LiveLocationDuration duration) async {
+    final ok = await ref
+        .read(liveLocationControllerProvider.notifier)
+        .start(conversationId: widget.conversationId, duration: duration);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not start live location.'),
           backgroundColor: AppColors.error,
         ),
       );

@@ -12,6 +12,7 @@ import '../../../models/profile.dart';
 import '../../contacts/screens/contact_picker_screen.dart';
 import '../../voice_notes/providers/voice_note_provider.dart';
 import '../../voice_notes/widgets/voice_record_button.dart';
+import '../../location/providers/live_location_provider.dart';
 
 enum _AttachmentChoice {
   photoCamera,
@@ -20,6 +21,7 @@ enum _AttachmentChoice {
   videoGallery,
   document,
   contact,
+  location,
 }
 
 /// Floating chat input per design.md "Inputs" component. Batch 5c added
@@ -34,9 +36,12 @@ class ChatInputBar extends ConsumerStatefulWidget {
     required this.onSendDocument,
     required this.onSendVoice,
     required this.onShareContact,
+    required this.onSendCurrentLocation,
     required this.uploadingMedia,
     this.onTextChanged,
   });
+  ...
+  final Future<void> Function() onSendCurrentLocation;
 
   final void Function(String text) onSend;
   final bool sending;
@@ -46,6 +51,8 @@ class ChatInputBar extends ConsumerStatefulWidget {
   final Future<void> Function(Uint8List bytes, String fileName) onSendDocument;
   final Future<void> Function(Uint8List bytes) onSendVoice;
   final Future<void> Function(Profile profile) onShareContact;
+  final Future<void> Function() onSendCurrentLocation;
+  final Future<void> Function(LiveLocationDuration duration) onStartLiveLocation;
 
   /// True while an attachment is uploading — disables "+" and voice
   /// recording so a second upload can't be queued mid-flight (no
@@ -138,6 +145,11 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
               onTap: () => Navigator.of(context).pop(_AttachmentChoice.contact),
             ),
             const SizedBox(height: 8),
+                                   ListTile(
+              leading: const Icon(Icons.location_on_outlined, color: AppColors.primary),
+              title: const Text('Location'),
+              onTap: () => Navigator.of(context).pop(_AttachmentChoice.location),
+            ),
           ],
         ),
       ),
@@ -157,6 +169,8 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
         await _pickAndSendDocument();
       case _AttachmentChoice.contact:
         await _pickAndShareContact();
+              case _AttachmentChoice.location:
+        await _openLocationSheet();
     }
   }
 
@@ -199,6 +213,76 @@ class _ChatInputBarState extends ConsumerState<ChatInputBar> {
     );
     if (profile == null) return;
     await widget.onShareContact(profile);
+  }
+
+    Future<void> _openLocationSheet() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppColors.surfaceContainer,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            ListTile(
+              leading: const Icon(Icons.location_on_outlined, color: AppColors.primary),
+              title: const Text('Current location'),
+              subtitle: const Text('Send your location once'),
+              onTap: () => Navigator.of(context).pop('current'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.location_history_outlined, color: AppColors.primary),
+              title: const Text('Live location'),
+              subtitle: const Text('Share your location as you move'),
+              onTap: () => Navigator.of(context).pop('live'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (choice == 'current') {
+      await widget.onSendCurrentLocation();
+    } else if (choice == 'live') {
+      await _openDurationSheet();
+    }
+  }
+
+  Future<void> _openDurationSheet() async {
+    final duration = await showModalBottomSheet<LiveLocationDuration>(
+      context: context,
+      backgroundColor: AppColors.surfaceContainer,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+      ),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text('Share live location for',
+                  style: Theme.of(context).textTheme.titleMedium),
+            ),
+            const SizedBox(height: 8),
+            for (final option in LiveLocationDuration.values)
+              ListTile(
+                leading: const Icon(Icons.timer_outlined, color: AppColors.primary),
+                title: Text(option.label),
+                onTap: () => Navigator.of(context).pop(option),
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (duration != null) {
+      await widget.onStartLiveLocation(duration);
+    }
   }
 
   @override

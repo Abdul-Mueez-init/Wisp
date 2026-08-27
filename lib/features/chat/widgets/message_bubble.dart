@@ -13,6 +13,7 @@ import '../../voice_notes/widgets/voice_note_bubble.dart';
 import '../providers/conversation_provider.dart';
 import '../providers/message_provider.dart';
 import 'video_player_view.dart';
+import '../../location/widgets/location_bubble_content.dart';
 
 /// Renders per design.md "Message Bubbles": Sent = primary-container bg,
 /// Cream text, right-aligned, 14px radius with a 4px "tail" corner;
@@ -36,7 +37,12 @@ class MessageBubble extends StatelessWidget {
   final String? status; // 'sent' | 'delivered' | 'read' — mine only
   final String? senderLabel;
 
-  static const _clippedTypes = {'image', 'video'};
+  static const _clippedTypes = {
+    'image',
+    'video',
+    "location_current",
+    "location_live"
+  };
 
   @override
   Widget build(BuildContext context) {
@@ -58,9 +64,13 @@ class MessageBubble extends StatelessWidget {
             borderRadius: radius,
             child: Container(
               decoration: BoxDecoration(color: bubbleColor),
-              child: message.type == 'image'
-                  ? _ImageBubbleContent(message: message, isMine: isMine)
-                  : _VideoBubbleContent(message: message, isMine: isMine),
+              child: switch (message.type) {
+                'image' =>
+                  _ImageBubbleContent(message: message, isMine: isMine),
+                'video' =>
+                  _VideoBubbleContent(message: message, isMine: isMine),
+                _ => LocationBubbleContent(message: message, isMine: isMine),
+              },
             ),
           )
         : Container(
@@ -196,13 +206,7 @@ class MessageBubble extends StatelessWidget {
   }
 
   (IconData, String) _placeholderFor(String type) {
-    switch (type) {
-      case 'location_current':
-      case 'location_live':
-        return (Icons.location_on_outlined, 'Location — coming in Batch 5e');
-      default:
-        return (Icons.help_outline, 'Unsupported message');
-    }
+    return (Icons.help_outline, 'Unsupported message');
   }
 
   IconData _statusIcon(String? status) {

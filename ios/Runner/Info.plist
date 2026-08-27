@@ -12,6 +12,8 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>NSMicrophoneUsageDescription</key>
 <string>Wisp needs microphone access to record voice notes.</string>
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>Wisp needs location access to share your location in chat.</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>

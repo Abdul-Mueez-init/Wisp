@@ -150,6 +150,11 @@ class MessageBubble extends StatelessWidget {
   /// treatment.
   Widget _standardContent(BuildContext context) {
     if (message.type == 'text') {
+      // Phase 7: translation only ever renders on the receiver's side
+      // (PRD.md §10 — translation targets the receiver's preferred
+      // language, so the sender's own outgoing bubble always shows
+      // exactly what they typed, nothing more).
+      final showTranslation = !isMine && message.translatedContent != null;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
@@ -165,8 +170,20 @@ class MessageBubble extends StatelessWidget {
                     ?.copyWith(color: AppColors.primary),
               ),
             ),
+          if (showTranslation) ...[
+            Text(
+              message.content ?? '',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: AppColors.onSurfaceVariant,
+                    fontStyle: FontStyle.italic,
+                  ),
+            ),
+            const SizedBox(height: 3),
+          ],
           Text(
-            message.content ?? '',
+            showTranslation
+                ? message.translatedContent!
+                : (message.content ?? ''),
             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                   color: isMine ? AppColors.cream : AppColors.onSurface,
                 ),

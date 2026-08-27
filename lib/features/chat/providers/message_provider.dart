@@ -1,5 +1,6 @@
 // lib/features/chat/providers/message_provider.dart
 import 'dart:typed_data';
+import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
@@ -13,6 +14,7 @@ import '../../auth/providers/auth_provider.dart';
 import '../data/media_repository.dart';
 import '../data/message_repository.dart';
 import '../providers/conversation_provider.dart';
+import '../../translation/providers/translation_provider.dart';
 
 final messageRepositoryProvider = Provider<MessageRepository>((ref) {
   return MessageRepository(SupabaseConfig.client);
@@ -72,6 +74,68 @@ class SendMessageController extends AsyncNotifier<void> {
             content: content,
           ),
     );
+    // Fire-and-forget: don't hold up the send (or its `state`) on a
+    // Gemini/Groq round trip — PRD.md's "realtime... must feel
+    // instant" principle. A failed translation is logged, never
+    // surfaced as a failed *send*, since the message already landed.
+    if (!state.hasError) {
+      unawaited(_translateIfDirect(
+        conversationId: conversationId,
+        content: content,
+      ));
+    }
+  }
+
+  /// Phase 7, scoped to direct chats only per the Phase 7 handoff doc's
+  /// Decision #1 — `messages.translated_content` is a single column
+  /// per row, which can't cleanly represent "translated differently
+  /// per recipient" for a group. Group messages are left untranslated
+  /// until/unless that becomes its own schema-backed phase.
+  Future<void> _translateIfDirect({
+    required String conversationId,
+    required String content,
+  }) async {
+    final myId = ref.read(currentSessionProvider)?.user.id;
+    if (myId == null) return;
+    try {
+      final conversation = await ref
+          .read(conversationRepositoryProvider)
+          .getConversation(conversationId);
+      if (conversation == null || !conversation.isDirect) return;
+
+      final otherMember = await ref
+          .read(conversationRepositoryProvider)
+          .getOtherDirectMember(conversationId: conversationId, myId: myId);
+      if (otherMember == null) return;
+
+      // Find the row we just inserted so we know which id to update.
+      // sendTextMessage doesn't return the new row's id today, so we
+      // look it up by (conversation, sender, content, most recent) —
+      // a small extra read, same "acceptable at demo scale" reasoning
+      // already used elsewhere (e.g. MediaRepository's extra list()
+      // call, per context.md).
+      final justSent =
+          await ref.read(messageRepositoryProvider).findMostRecentTextMessage(
+                conversationId: conversationId,
+                senderId: myId,
+                content: content.trim(),
+              );
+      if (justSent == null) return;
+
+      final result =
+          await ref.read(translationRepositoryProvider).detectAndTranslate(
+                text: content.trim(),
+                targetLanguageCode: otherMember.preferredLanguage,
+              );
+
+      await ref.read(messageRepositoryProvider).updateTranslation(
+            messageId: justSent,
+            originalLanguage: result.detectedLanguage,
+            translatedContent: result.translatedText,
+          );
+    } catch (_) {
+      // Best-effort — see the doc comment above.
+    }
   }
 
   /// Batch 5d — no upload involved (unlike image/video/document/voice),

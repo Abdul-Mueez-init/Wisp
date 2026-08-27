@@ -56,6 +56,53 @@ class MessageRepository {
     }
   }
 
+  /// Batch: Phase 7 translation. Updates a text message's own row with
+  /// the detected source language and (if applicable) its translation,
+  /// after the message has already been inserted and shown — same
+  /// "insert now, update in place moments later" shape as
+  /// `updateLiveLocationPin`. Requires `messages_update_own`-style
+  /// self-update, already granted per the Phase 5e RLS migration.
+  Future<void> updateTranslation({
+    required String messageId,
+    required String originalLanguage,
+    String? translatedContent,
+  }) async {
+    try {
+      await _client.from('messages').update({
+        'original_language': originalLanguage,
+        'translated_content': translatedContent,
+      }).eq('id', messageId);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Small helper for Phase 7's fire-and-forget translation step —
+  /// `sendTextMessage` doesn't return the inserted row's id, so this
+  /// finds it by (conversation, sender, exact content, most recent).
+  /// Fine at demo scale; not a general-purpose lookup.
+  Future<String?> findMostRecentTextMessage({
+    required String conversationId,
+    required String senderId,
+    required String content,
+  }) async {
+    try {
+      final row = await _client
+          .from('messages')
+          .select('id')
+          .eq('conversation_id', conversationId)
+          .eq('sender_id', senderId)
+          .eq('type', 'text')
+          .eq('content', content)
+          .order('created_at', ascending: false)
+          .limit(1)
+          .maybeSingle();
+      return row?['id'] as String?;
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   /// Generic media-message insert — covers 'image'/'video'/'document'/
   /// 'voice', all sharing the same shape: a storage path in
   /// `media_url`, an optional caption in `content`. [messageId] is

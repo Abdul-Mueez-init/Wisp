@@ -101,6 +101,80 @@ class ConversationRepository {
     return Conversation.fromJson(convRow);
   }
 
+  /// Phase 8 — the AI Feature 2 "direct-message the agent like a
+  /// regular contact" entry point (PRD.md §10). Deliberately NOT a new
+  /// `conversations.type` value (no schema change, per rules.md Rule
+  /// 7): instead this is an ordinary `type: 'direct'` conversation
+  /// whose ONLY `conversation_members` row is the user themself.
+  /// [_createDirect] above always inserts *both* members together for
+  /// a real human-to-human direct chat, so a single-member direct
+  /// conversation can only ever be this reserved AI thread — that
+  /// invariant is what lets the rest of the app (chat list tile, chat
+  /// detail screen) treat "is this the AI conversation?" as derived
+  /// data instead of a new column.
+  Future<Conversation> findOrCreateAiConversation(String myId) async {
+    try {
+      final existing = await _findExistingAiConversation(myId);
+      if (existing != null) return existing;
+
+      final convRow = await _client
+          .from('conversations')
+          .insert({'type': 'direct', 'created_by': myId})
+          .select()
+          .single();
+      final conversationId = convRow['id'] as String;
+
+      await _client.from('conversation_members').insert({
+        'conversation_id': conversationId,
+        'user_id': myId,
+        'role': 'member',
+      });
+
+      return Conversation.fromJson(convRow);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  Future<Conversation?> _findExistingAiConversation(String myId) async {
+    final myRows = await _client
+        .from('conversation_members')
+        .select('conversation_id, conversations!inner(*)')
+        .eq('user_id', myId)
+        .eq('conversations.type', 'direct');
+
+    final myDirectIds =
+        (myRows as List).map((r) => r['conversation_id'] as String).toList();
+    if (myDirectIds.isEmpty) return null;
+
+    // One query for every member row across all of my direct
+    // conversations, then group client-side to find the one with
+    // exactly one member — PostgREST can't express a "having count =
+    // 1" filter directly, and this avoids an extra round trip per
+    // conversation on top of it.
+    final allMemberRows = await _client
+        .from('conversation_members')
+        .select('conversation_id')
+        .inFilter('conversation_id', myDirectIds);
+
+    final counts = <String, int>{};
+    for (final row in allMemberRows as List) {
+      final id = row['conversation_id'] as String;
+      counts[id] = (counts[id] ?? 0) + 1;
+    }
+
+    final aiConversationId = counts.entries
+        .firstWhere((e) => e.value == 1, orElse: () => const MapEntry('', 0))
+        .key;
+    if (aiConversationId.isEmpty) return null;
+
+    final match =
+        myRows.firstWhere((r) => r['conversation_id'] == aiConversationId);
+    return Conversation.fromJson(
+      match['conversations'] as Map<String, dynamic>,
+    );
+  }
+
   /// Fetches a single conversation row by id — used by the chat detail
   /// screen to resolve a group's name/type when it wasn't passed in via
   /// navigation `extra` (Phase 3).

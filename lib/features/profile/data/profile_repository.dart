@@ -166,6 +166,31 @@ class ProfileRepository {
     }
   }
 
+  /// Batch 8 — resolves a set of sender ids to display labels
+  /// (display name, falling back to `@username`) in one query, so
+  /// `AiAgentRepository`'s chat-transcript prompt can show real names
+  /// instead of raw ids. Read-only; covered by the existing
+  /// `profiles_select_all` policy (readable by all authenticated
+  /// users), no new RLS needed.
+  Future<Map<String, String>> fetchDisplayLabels(Set<String> userIds) async {
+    if (userIds.isEmpty) return {};
+    try {
+      final rows = await _client
+          .from('profiles')
+          .select('id, username, display_name')
+          .inFilter('id', userIds.toList());
+      return {
+        for (final row in rows as List)
+          row['id'] as String:
+              (row['display_name'] as String?)?.isNotEmpty == true
+                  ? row['display_name'] as String
+                  : '@${row['username']}',
+      };
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   /// Resolves a stored avatar path into a public URL for display.
   /// Assumes the `avatars` Storage bucket is public.
   String resolveAvatarUrl(String avatarPath) {

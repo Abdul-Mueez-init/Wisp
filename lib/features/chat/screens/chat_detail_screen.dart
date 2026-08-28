@@ -16,6 +16,7 @@ import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
 import '../../location/providers/location_provider.dart';
 import '../../location/providers/live_location_provider.dart';
+import '../../ai_agent/providers/ai_agent_provider.dart';
 
 /// Phase 2 1-on-1 chat core, extended in Phase 3 to also render group
 /// conversations (plan.md: "Group chat detail screen (reuses chat core
@@ -27,6 +28,7 @@ class ChatDetailScreen extends ConsumerStatefulWidget {
     required this.conversationId,
     this.otherProfile,
     this.groupConversation,
+    this.isAiConversation = false,
   });
 
   final String conversationId;
@@ -38,6 +40,13 @@ class ChatDetailScreen extends ConsumerStatefulWidget {
   /// Passed via navigation `extra` right after creating a group — same
   /// reasoning as [otherProfile] (Phase 3).
   final Conversation? groupConversation;
+
+  /// Phase 8 — true when this is the reserved single-member AI-DM
+  /// conversation (`?ai=true` on the route, set by the "Wisp AI" chat
+  /// list tile). There is no second real member/profile to fetch in
+  /// this case, so this flag lets the screen skip the otherProfile/
+  /// presence lookups entirely instead of them just resolving to null.
+  final bool isAiConversation;
 
   @override
   ConsumerState<ChatDetailScreen> createState() => _ChatDetailScreenState();
@@ -95,9 +104,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
         widget.groupConversation ?? conversationAsync?.value;
     final isGroup = resolvedConversation?.isGroup ?? false;
 
-    final otherProfileAsync = (!isGroup && widget.otherProfile == null)
-        ? ref.watch(otherDirectMemberProvider(widget.conversationId))
-        : null;
+    final otherProfileAsync =
+        (!isGroup && !widget.isAiConversation && widget.otherProfile == null)
+            ? ref.watch(otherDirectMemberProvider(widget.conversationId))
+            : null;
     final displayProfile = widget.otherProfile ?? otherProfileAsync?.value;
 
     final membersAsync =
@@ -125,13 +135,19 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final typingUserIds =
         ref.watch(typingUsersStreamProvider(widget.conversationId)).value ??
             const [];
-    final subtitleText = _subtitleText(
-      isGroup: isGroup,
-      typingUserIds: typingUserIds,
-      senderNames: senderNames,
-      isOnline: isOnline,
-      lastSeenAt: lastSeenAt,
-    );
+
+    final aiThinking =
+        ref.watch(aiAgentThinkingProvider(widget.conversationId));
+    final subtitleText = widget.isAiConversation && aiThinking
+        ? 'Wisp is typing…'
+        : _subtitleText(
+            isGroup: isGroup,
+            typingUserIds: typingUserIds,
+            senderNames: senderNames,
+            isOnline: isOnline,
+            lastSeenAt: lastSeenAt,
+            aiThinking: aiThinking,
+          );
 
     return Scaffold(
       backgroundColor: AppColors.backgroundBase,
@@ -148,16 +164,21 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                 children: [
                   CircleAvatar(
                     radius: 18,
-                    backgroundColor: AppColors.surfaceContainerHigh,
-                    child: Text(
-                      _titleInitial(
-                          isGroup, resolvedConversation, displayProfile),
-                      style: const TextStyle(color: AppColors.primary),
-                    ),
+                    backgroundColor: widget.isAiConversation
+                        ? AppColors.primaryContainer
+                        : AppColors.surfaceContainerHigh,
+                    child: widget.isAiConversation
+                        ? const Icon(Icons.auto_awesome,
+                            size: 18, color: AppColors.primary)
+                        : Text(
+                            _titleInitial(
+                                isGroup, resolvedConversation, displayProfile),
+                            style: const TextStyle(color: AppColors.primary),
+                          ),
                   ),
                   // design.md "Status & Indicators — Online Dot": 8px
                   // solid circle in Moderate Green.
-                  if (!isGroup && isOnline == true)
+                  if (!isGroup && !widget.isAiConversation && isOnline == true)
                     Positioned(
                       right: -1,
                       bottom: -1,
@@ -183,7 +204,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
-                      _titleText(isGroup, resolvedConversation, displayProfile),
+                      widget.isAiConversation
+                          ? 'Wisp AI'
+                          : _titleText(
+                              isGroup, resolvedConversation, displayProfile),
                       style: Theme.of(context).textTheme.titleMedium,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -192,7 +216,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                         subtitleText,
                         style:
                             Theme.of(context).textTheme.labelMedium?.copyWith(
-                                  color: typingUserIds.isNotEmpty
+                                  color: typingUserIds.isNotEmpty || aiThinking
                                       ? AppColors.primary
                                       : AppColors.onSurfaceVariant,
                                 ),
@@ -300,6 +324,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                 ref.read(sendMessageControllerProvider.notifier).sendText(
                       conversationId: widget.conversationId,
                       content: text,
+                      isAiConversation: widget.isAiConversation,
                     ),
             onTextChanged: (text) => ref
                 .read(typingControllerProvider.notifier)
@@ -402,7 +427,9 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     required Map<String, String> senderNames,
     required bool? isOnline,
     required DateTime? lastSeenAt,
+    bool aiThinking = false,
   }) {
+    if (aiThinking) return 'Wisp is typing…';
     if (typingUserIds.isNotEmpty) {
       if (!isGroup) return 'typing…';
       final names = typingUserIds

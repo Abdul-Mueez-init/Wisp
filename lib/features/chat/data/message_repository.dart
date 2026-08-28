@@ -37,6 +37,61 @@ class MessageRepository {
         (rows) => rows.map(MessageStatus.fromJson).toList());
   }
 
+  /// Batch 8 — one-shot fetch of the most recent messages in a
+  /// conversation, oldest first, for `AiAgentController` to build a
+  /// context transcript from (PRD.md §10: "context of recent chat
+  /// history... not just the single message it's mentioned in").
+  /// Deliberately a plain `Future` fetch, not the `.stream()` used by
+  /// [watchMessages] — the agent needs one snapshot to reason over, not
+  /// a live subscription.
+  Future<List<Message>> fetchRecentMessages({
+    required String conversationId,
+    int limit = 20,
+  }) async {
+    try {
+      final rows = await _client
+          .from('messages')
+          .select()
+          .eq('conversation_id', conversationId)
+          .order('created_at', ascending: false)
+          .limit(limit);
+      return (rows as List)
+          .map((r) => Message.fromJson(r as Map<String, dynamic>))
+          .toList()
+          .reversed
+          .toList();
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Batch 8 — inserts the embedded AI agent's reply as its own
+  /// `messages` row: `sender_id` null, `is_ai_message` true, exactly
+  /// the shape ERD.md's `messages.sender_id` comment ("nullable if
+  /// sender is the AI agent") anticipated. Passes `messages_insert_member`
+  /// RLS the same way every other insert in this file does — the
+  /// *caller* is a real member of the conversation; the policy has no
+  /// separate check on `sender_id` itself, so this doesn't need a
+  /// service-role key or a new policy.
+  Future<void> sendAiMessage({
+    required String conversationId,
+    required String content,
+  }) async {
+    final trimmed = content.trim();
+    if (trimmed.isEmpty) return;
+    try {
+      await _client.from('messages').insert({
+        'conversation_id': conversationId,
+        'sender_id': null,
+        'is_ai_message': true,
+        'type': 'text',
+        'content': trimmed,
+      });
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   Future<void> sendTextMessage({
     required String conversationId,
     required String senderId,

@@ -15,6 +15,7 @@ import '../data/media_repository.dart';
 import '../data/message_repository.dart';
 import '../providers/conversation_provider.dart';
 import '../../translation/providers/translation_provider.dart';
+import '../../ai_agent/providers/ai_agent_provider.dart';
 
 final messageRepositoryProvider = Provider<MessageRepository>((ref) {
   return MessageRepository(SupabaseConfig.client);
@@ -63,6 +64,12 @@ class SendMessageController extends AsyncNotifier<void> {
   Future<void> sendText({
     required String conversationId,
     required String content,
+    // Phase 8 — true only for the reserved AI-DM conversation
+    // (`findOrCreateAiConversation`), where every message gets an
+    // agent reply rather than requiring an explicit "@wisp" mention.
+    // Passed in by `ChatDetailScreen`, which already knows this from
+    // routing, rather than re-derived here with an extra query.
+    bool isAiConversation = false,
   }) async {
     final myId = ref.read(currentSessionProvider)?.user.id;
     if (myId == null || content.trim().isEmpty) return;
@@ -76,13 +83,19 @@ class SendMessageController extends AsyncNotifier<void> {
     );
     // Fire-and-forget: don't hold up the send (or its `state`) on a
     // Gemini/Groq round trip — PRD.md's "realtime... must feel
-    // instant" principle. A failed translation is logged, never
-    // surfaced as a failed *send*, since the message already landed.
+    // instant" principle. A failed translation/agent reply is
+    // swallowed, never surfaced as a failed *send*, since the message
+    // already landed.
     if (!state.hasError) {
       unawaited(_translateIfDirect(
         conversationId: conversationId,
         content: content,
       ));
+      unawaited(ref.read(aiAgentControllerProvider.notifier).maybeRespond(
+            conversationId: conversationId,
+            triggerText: content,
+            forceRespond: isAiConversation,
+          ));
     }
   }
 

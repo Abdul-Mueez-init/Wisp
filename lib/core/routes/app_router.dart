@@ -84,10 +84,18 @@ final routerProvider = Provider<GoRouter>((ref) {
           final extra = state.extra;
           final otherProfile = extra is Profile ? extra : null;
           final groupConversation = extra is Conversation ? extra : null;
+
+          // Phase 8 — set only by the Chat List's pinned "Wisp AI"
+          // tile after `findOrCreateAiConversation`; a query param
+          // rather than `extra` since `extra` is already typed to
+          // distinguish Profile vs Conversation above.
+          final isAiConversation = state.uri.queryParameters['ai'] == 'true';
+
           return ChatDetailScreen(
             conversationId: conversationId,
             otherProfile: otherProfile,
             groupConversation: groupConversation,
+            isAiConversation: isAiConversation,
           );
         },
       ),

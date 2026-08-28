@@ -39,6 +39,33 @@ class StartConversationController extends AsyncNotifier<void> {
     });
     return conversationId;
   }
+
+  /// Phase 8 — opens (finding or creating) the user's reserved AI-DM
+  /// conversation. Same `AsyncNotifier<void>` / return-the-id shape as
+  /// [startDirectConversationWith] above, deliberately reusing this
+  /// controller rather than adding a parallel one, since both actions
+  /// are "resolve a direct conversation id, then navigate."
+  Future<String?> openAiConversation() async {
+    final myId = ref.read(currentSessionProvider)?.user.id;
+    if (myId == null) {
+      state = AsyncError(
+        const AuthFailure('No authenticated session found.'),
+        StackTrace.current,
+      );
+      return null;
+    }
+
+    state = const AsyncLoading();
+    String? conversationId;
+
+    state = await AsyncValue.guard(() async {
+      final conversation = await ref
+          .read(conversationRepositoryProvider)
+          .findOrCreateAiConversation(myId);
+      conversationId = conversation.id;
+    });
+    return conversationId;
+  }
 }
 
 final startConversationControllerProvider =

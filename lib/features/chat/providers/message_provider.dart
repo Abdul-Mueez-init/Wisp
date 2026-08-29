@@ -16,6 +16,8 @@ import '../data/message_repository.dart';
 import '../providers/conversation_provider.dart';
 import '../../translation/providers/translation_provider.dart';
 import '../../ai_agent/providers/ai_agent_provider.dart';
+import '../../voice_notes/data/voice_transcription_repository.dart';
+import '../../voice_notes/providers/voice_transcription_provider.dart';
 
 final messageRepositoryProvider = Provider<MessageRepository>((ref) {
   return MessageRepository(SupabaseConfig.client);
@@ -298,7 +300,59 @@ class SendMediaMessageController extends AsyncNotifier<void> {
           );
     });
     state = result;
+
+    // Phase 9 — fire-and-forget, same "don't hold up the send" shape
+    // as Phase 7's translation step (see SendMessageController). The
+    // voice note itself has already landed and is playable; a failed
+    // transcription/action-extraction pass is never surfaced as a
+    // failed *send*.
+    if (!result.hasError && type == 'voice') {
+      unawaited(_transcribeAndExtractActions(
+        messageId: messageId,
+        audioBytes: bytes,
+      ));
+    }
+
     return !result.hasError;
+  }
+
+  /// AI Feature 3 (PRD.md §10, Phase 9): transcribes the voice note via
+  /// Gemini's native audio input, then runs a second text pass over
+  /// the transcript to pull out action items/reminders — both results
+  /// written back onto the same `messages` row so the realtime stream
+  /// (already open on this conversation, per `messagesStreamProvider`)
+  /// carries them to both sides the moment they're ready. Unlike
+  /// translation, this isn't scoped to direct chats —
+  /// `voice_transcript`/`voice_actions` are per-message columns, not
+  /// per-recipient, so there's no group-chat ambiguity to work around.
+  Future<void> _transcribeAndExtractActions({
+    required String messageId,
+    required Uint8List audioBytes,
+  }) async {
+    try {
+      final repo = ref.read(voiceTranscriptionRepositoryProvider);
+      final transcript = await repo.transcribe(audioBytes);
+      if (transcript.trim().isEmpty) return;
+
+      List<VoiceActionItem> actions = const [];
+      try {
+        actions = await repo.extractActions(transcript);
+      } catch (_) {
+        // The transcript is still worth saving even if the second
+        // (action-extraction) pass fails — two independent AI calls
+        // per plan.md, not an all-or-nothing pair.
+      }
+
+      await ref.read(messageRepositoryProvider).updateVoiceTranscription(
+            messageId: messageId,
+            transcript: transcript,
+            actions: actions.isEmpty
+                ? null
+                : {'items': actions.map((a) => a.toJson()).toList()},
+          );
+    } catch (_) {
+      // Best-effort — see the doc comment above.
+    }
   }
 
   String _typeLabel(String type) {

@@ -132,6 +132,29 @@ class MessageRepository {
     }
   }
 
+  /// Batch: Phase 9 voice transcription + action extraction. Same
+  /// "insert now, update in place moments later" shape as
+  /// [updateTranslation]/`updateLiveLocationPin` above — requires the
+  /// same `messages_update_own`-style self-update RLS already granted
+  /// for those, nothing new to migrate. [actions] is passed straight
+  /// through to the `voice_actions` jsonb column (null when the
+  /// transcript had no actionable content — see
+  /// `VoiceTranscriptionRepository`).
+  Future<void> updateVoiceTranscription({
+    required String messageId,
+    required String transcript,
+    Map<String, dynamic>? actions,
+  }) async {
+    try {
+      await _client.from('messages').update({
+        'voice_transcript': transcript,
+        'voice_actions': actions,
+      }).eq('id', messageId);
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   /// Small helper for Phase 7's fire-and-forget translation step —
   /// `sendTextMessage` doesn't return the inserted row's id, so this
   /// finds it by (conversation, sender, exact content, most recent).

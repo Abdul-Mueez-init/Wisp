@@ -179,11 +179,6 @@ class CallController extends Notifier<CallSessionState> {
       await ref
           .read(callRepositoryProvider)
           .updateStatus(callId: call.id, status: 'declined');
-      await ref.read(callRepositoryProvider).insertCallEventMessage(
-            conversationId: call.conversationId,
-            callerId: call.callerId,
-            callId: call.id,
-          );
       await _signaling?.sendHangup();
     }
     await _endLocally();
@@ -207,20 +202,14 @@ class CallController extends Notifier<CallSessionState> {
             status: reachedActive ? 'ended' : 'missed',
             setEndedNow: reachedActive,
           );
-      await ref.read(callRepositoryProvider).insertCallEventMessage(
-            conversationId: call.conversationId,
-            callerId: call.callerId,
-            callId: call.id,
-          );
       await _signaling?.sendHangup();
     }
     await _endLocally();
   }
 
   /// The other side hung up (cancelled, declined, or ended) — they
-  /// already wrote the terminal `calls` status and the call-event
-  /// message themselves, so this side only needs to tear down its own
-  /// local session.
+  /// already wrote the terminal `calls` status themselves, so this
+  /// side only needs to tear down its own local session.
   void _onRemoteHangup() {
     unawaited(_endLocally());
   }

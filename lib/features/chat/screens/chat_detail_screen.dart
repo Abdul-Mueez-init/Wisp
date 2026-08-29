@@ -17,6 +17,7 @@ import '../widgets/message_bubble.dart';
 import '../../location/providers/location_provider.dart';
 import '../../location/providers/live_location_provider.dart';
 import '../../ai_agent/providers/ai_agent_provider.dart';
+import '../../calls/providers/call_controller.dart';
 
 /// Phase 2 1-on-1 chat core, extended in Phase 3 to also render group
 /// conversations (plan.md: "Group chat detail screen (reuses chat core
@@ -230,6 +231,27 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
             ],
           ),
         ),
+        // Phase 10, Batch 10c — call icons per design.md's Chat Detail
+        // 1-on-1 Stitch export (video then phone, right-aligned).
+        // 1-on-1 only per PRD.md §11: hidden for groups and the AI
+        // conversation, and only shown once the other member's id is
+        // known (needed for CallController.startCall's calleeId).
+        actions: (!isGroup &&
+                !widget.isAiConversation &&
+                displayProfile != null)
+            ? [
+                IconButton(
+                  tooltip: 'Video call',
+                  icon: const Icon(Icons.videocam_outlined),
+                  onPressed: () => _startCall(displayProfile, isVideo: true),
+                ),
+                IconButton(
+                  tooltip: 'Voice call',
+                  icon: const Icon(Icons.call_outlined),
+                  onPressed: () => _startCall(displayProfile, isVideo: false),
+                ),
+              ]
+            : null,
       ),
       body: Column(
         children: [
@@ -399,6 +421,29 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(error?.toString() ?? 'Could not send attachment.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
+
+  /// Places a call from this chat's call/video icons. `CallController`
+  /// itself refuses to start a second call if one's already active on
+  /// this device (returns false, state untouched) — that failure and a
+  /// genuine start failure look the same here, both just don't push.
+  Future<void> _startCall(Profile otherProfile, {required bool isVideo}) async {
+    final controller = ref.read(callControllerProvider.notifier);
+    final ok = await controller.startCall(
+      conversationId: widget.conversationId,
+      calleeId: otherProfile.id,
+      isVideo: isVideo,
+    );
+    if (ok && mounted) {
+      context.push('/call');
+    } else if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not start the call.'),
           backgroundColor: AppColors.error,
         ),
       );

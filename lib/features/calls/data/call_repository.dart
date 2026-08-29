@@ -92,26 +92,4 @@ class CallRepository {
         .eq('conversation_id', conversationId)
         .map((rows) => rows.map(Call.fromJson).toList());
   }
-
-  /// Inserts the in-chat 'call' event bubble once a call reaches a
-  /// terminal state (ended/missed/declined) — deliberately not
-  /// inserted at 'ringing' time, so a call that's still ringing
-  /// doesn't clutter the chat before its outcome is known.
-  /// `sender_id` is always the caller, regardless of who ends it.
-  Future<void> insertCallEventMessage({
-    required String conversationId,
-    required String callerId,
-    required String callId,
-  }) async {
-    try {
-      await _client.from('messages').insert({
-        'conversation_id': conversationId,
-        'sender_id': callerId,
-        'type': 'call',
-        'call_id': callId,
-      });
-    } on PostgrestException catch (e) {
-      throw SupabaseFailure(e.message);
-    }
-  }
 }

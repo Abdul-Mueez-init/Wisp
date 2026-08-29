@@ -1,6 +1,7 @@
 // lib/core/routes/app_shell.dart
 import 'package:flutter/material.dart';
 
+import '../../features/calls/screens/calls_tab_screen.dart';
 import '../../features/chat/screens/chat_list_screen.dart';
 import '../../features/profile/screens/profile_settings_screen.dart';
 import '../../features/stories/screens/status_list_screen.dart';
@@ -8,12 +9,10 @@ import '../theme/app_theme.dart';
 
 /// Bottom-nav scaffold added in Batch 6b — per the Phase 6 handoff doc,
 /// both the chat list and the Status screen assumed a persistent
-/// bottom nav (Chats/Status/Calls/Settings) that didn't exist. Chats
-/// and Status are wired for real; Settings is now real too (profile-
-/// settings gap fix — was a sign-out-only stub). Calls remains a
-/// deliberately thin "coming later" stub — per rules.md Rule 2, a stub
-/// that plainly says what's missing is fine, a fake populated screen
-/// isn't. Replaces the old bootstrap screen as the `/` route.
+/// bottom nav (Chats/Status/Calls/Settings) that didn't exist. All four
+/// tabs are now real screens (Batch 10c closes out Calls, the last
+/// remaining stub — previously "coming later" per rules.md Rule 2).
+/// Replaces the old bootstrap screen as the `/` route.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -27,7 +26,7 @@ class _AppShellState extends State<AppShell> {
   static const _tabs = [
     ChatListScreen(),
     StatusListScreen(),
-    _CallsStubScreen(),
+    CallsTabScreen(),
     ProfileSettingsScreen(),
   ];
 
@@ -62,28 +61,6 @@ class _AppShellState extends State<AppShell> {
             label: 'Settings',
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _CallsStubScreen extends StatelessWidget {
-  const _CallsStubScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Calls')),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.pageMargin),
-          child: Text(
-            'Audio and video calling lands in Phase 10 — WebRTC + '
-            'Supabase Realtime signaling, per plan.md.',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-        ),
       ),
     );
   }

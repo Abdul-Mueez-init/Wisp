@@ -19,6 +19,7 @@ class Message {
   final DateTime? liveLocationExpiresAt;
   final String? voiceTranscript;
   final Map<String, dynamic>? voiceActions;
+  final String? callId; // Phase 10 — set only when type == 'call'
   final DateTime createdAt;
 
   const Message({
@@ -38,6 +39,7 @@ class Message {
     this.liveLocationExpiresAt,
     this.voiceTranscript,
     this.voiceActions,
+    this.callId,
     required this.createdAt,
   });
 
@@ -63,6 +65,7 @@ class Message {
           : null,
       voiceTranscript: json['voice_transcript'] as String?,
       voiceActions: json['voice_actions'] as Map<String, dynamic>?,
+      callId: json['call_id'] as String?,
       createdAt: DateTime.parse(json['created_at'] as String),
     );
   }
@@ -84,6 +87,7 @@ class Message {
         'live_location_expires_at': liveLocationExpiresAt?.toIso8601String(),
         'voice_transcript': voiceTranscript,
         'voice_actions': voiceActions,
+        'call_id': callId,
         'created_at': createdAt.toIso8601String(),
       };
 }

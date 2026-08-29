@@ -6,6 +6,7 @@ import 'app_shell.dart';
 import '../../features/auth/providers/auth_provider.dart';
 import '../../features/auth/screens/login_signup_screen.dart';
 import '../../features/auth/screens/onboarding_screen.dart';
+import '../../features/calls/screens/call_screen.dart';
 import '../../features/chat/screens/chat_detail_screen.dart';
 import '../../features/contacts/screens/user_search_screen.dart';
 import '../../features/groups/screens/group_creation_screen.dart';
@@ -98,6 +99,15 @@ final routerProvider = Provider<GoRouter>((ref) {
             isAiConversation: isAiConversation,
           );
         },
+      ),
+      GoRoute(
+        // Phase 10 — single screen covering ringing/connecting/active;
+        // reads all its state from callControllerProvider, so it takes
+        // no path params/extra. Pushed either by the caller (chat
+        // detail's call icons) or automatically for the callee (see
+        // _IncomingCallListener in main.dart).
+        path: '/call',
+        builder: (context, state) => const CallScreen(),
       ),
       GoRoute(
         // Batch 6b: launched from the Status tab's "My status" row.

@@ -2,56 +2,54 @@ name: wisp
 description: A WhatsApp-inspired realtime messaging app with embedded AI features.
 publish_to: 'none'
 version: 0.1.0+1
-
+ 
 environment:
   sdk: '>=3.3.0 <4.0.0'
-
+ 
 dependencies:
   flutter:
     sdk: flutter
-
+ 
   # State management
   flutter_riverpod: ^2.5.1
-
+ 
   # Routing
   go_router: ^14.2.0
-
+ 
   # Backend
   supabase_flutter: ^2.5.6
-
+ 
   # Env config
   flutter_dotenv: ^5.1.0
-
+ 
   # AI (Gemini primary)
   google_generative_ai: ^0.4.6
-
+ 
   # AI (Groq fallback — no official SDK, plain REST via http)
   http: ^1.6.0
-
+ 
   cupertino_icons: ^1.0.8
-
+ 
   image_picker: ^1.1.2
   
   uuid: ^4.5.1
   file_picker: ^8.1.2      # NEW — Batch 5b: document picking
   video_player: ^2.9.2     # NEW — Batch 5b: video playback
   url_launcher: ^6.3.2     # NEW — Batch 5b: open/download documents
-
+ 
   record: ^5.2.1            # NEW — Batch 5c: voice note recording
   just_audio: ^0.9.42       # NEW — Batch 5c: voice note playback
   geolocator: ^14.0.2
   flutter_map: ^8.3.1
   latlong2: ^0.10.1
-
-geolocator: ^13.0.2       # NEW — Batch 5e: current + live location
-flutter_map: ^7.0.2       # NEW — Batch 5e: OSM map rendering (zero-cost stack, no Google Maps billing)
-latlong2: ^0.9.1          # NEW — Batch 5e: flutter_map's LatLng type
-
+ 
+  flutter_webrtc: ^0.11.7   # NEW — Phase 10: WebRTC peer connections for audio/video calls
+ 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
-
+ 
 flutter:
   uses-material-design: true
   assets:

@@ -4,9 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'config/ai_config.dart';
 import 'config/supabase_config.dart';
+import 'config/webrtc_config.dart';
 import 'core/routes/app_router.dart';
 import 'core/theme/app_theme.dart';
 import 'features/auth/providers/auth_provider.dart';
+import 'features/calls/providers/call_controller.dart';
+import 'features/calls/providers/call_session_state.dart';
 import 'features/chat/providers/presence_provider.dart';
 
 Future<void> main() async {
@@ -22,6 +25,14 @@ Future<void> main() async {
   AiConfig.initialize(
     geminiApiKey: dotenv.env['GEMINI_API_KEY'] ?? '',
     groqApiKey: dotenv.env['GROQ_API_KEY'] ?? '',
+  );
+
+  // Phase 10 — TURN creds optional at first run; STUN-only fallback
+  // inside WebrtcConfig keeps calls working before you fill these in.
+  WebrtcConfig.initialize(
+    turnUrl: dotenv.env['TURN_URL'] ?? '',
+    turnUsername: dotenv.env['TURN_USERNAME'] ?? '',
+    turnCredential: dotenv.env['TURN_CREDENTIAL'] ?? '',
   );
 
   runApp(const ProviderScope(child: WispApp()));
@@ -96,6 +107,21 @@ class _PresenceLifecycleState extends ConsumerState<_PresenceLifecycle>
   @override
   Widget build(BuildContext context) {
     final isAuthenticated = ref.watch(currentSessionProvider) != null;
+
+    // Phase 10 — CallController flips to incomingRinging the moment a
+    // 'ringing' row shows up for this user (see
+    // incomingRingingCallProvider). That happens purely off a realtime
+    // stream, with no screen necessarily watching for it, so this
+    // app-wide listener is what actually surfaces the incoming-call
+    // screen. `routerProvider`'s GoRouter is pushed directly (not via
+    // `context.push`) since this widget sits above the Router in the
+    // tree built by MaterialApp.router's `builder`.
+    ref.listen<CallSessionState>(callControllerProvider, (previous, next) {
+      final wasIncoming = previous?.phase == CallPhase.incomingRinging;
+      if (!wasIncoming && next.phase == CallPhase.incomingRinging) {
+        ref.read(routerProvider).push('/call');
+      }
+    });
 
     if (isAuthenticated != _wasAuthenticated) {
       _wasAuthenticated = isAuthenticated;

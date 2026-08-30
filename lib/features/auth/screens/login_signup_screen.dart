@@ -17,6 +17,16 @@ class _LoginSignupScreenState extends ConsumerState<LoginSignupScreen> {
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
 
+  // Ephemeral UI-only state (architecture.md's StatefulWidget exception):
+  // authControllerProvider only exposes a single shared isLoading flag for
+  // whichever action is in flight, with no way to tell sign-in and sign-up
+  // apart. Without this, both buttons react to the same flag and only
+  // whichever button's `child:` happens to check it shows a spinner —
+  // which is exactly the "spinner shows on the wrong button" bug. This
+  // tracks which button was actually pressed so each one only reflects
+  // its own loading state.
+  bool _isSignUpAttempt = false;
+
   @override
   void dispose() {
     _emailController.dispose();
@@ -41,6 +51,7 @@ class _LoginSignupScreenState extends ConsumerState<LoginSignupScreen> {
     final email = _emailController.text.trim();
     final password = _passwordController.text;
     final controller = ref.read(authControllerProvider.notifier);
+    setState(() => _isSignUpAttempt = isSignUp);
     if (isSignUp) {
       controller.signUp(email: email, password: password);
     } else {
@@ -121,7 +132,7 @@ class _LoginSignupScreenState extends ConsumerState<LoginSignupScreen> {
                       child: ElevatedButton(
                         onPressed:
                             isLoading ? null : () => _submit(isSignUp: false),
-                        child: isLoading
+                        child: (isLoading && !_isSignUpAttempt)
                             ? const SizedBox(
                                 height: 20,
                                 width: 20,
@@ -139,7 +150,16 @@ class _LoginSignupScreenState extends ConsumerState<LoginSignupScreen> {
                       child: OutlinedButton(
                         onPressed:
                             isLoading ? null : () => _submit(isSignUp: true),
-                        child: const Text('Create account'),
+                        child: (isLoading && _isSignUpAttempt)
+                            ? const SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: AppColors.primary,
+                                ),
+                              )
+                            : const Text('Create account'),
                       ),
                     ),
                   ],

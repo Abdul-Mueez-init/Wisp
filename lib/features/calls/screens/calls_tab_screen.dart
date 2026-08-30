@@ -128,11 +128,15 @@ class _CallHistoryTile extends ConsumerWidget {
             color: subtitleColor ?? AppColors.onSurfaceVariant,
           ),
           const SizedBox(width: 4),
-          Text(
-            _subtitleText(isOutgoing),
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: subtitleColor,
-                ),
+          Expanded(
+            child: Text(
+              _subtitleText(isOutgoing),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: subtitleColor,
+                  ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
           ),
         ],
       ),

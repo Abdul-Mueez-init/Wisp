@@ -92,7 +92,13 @@ class _PresenceLifecycleState extends ConsumerState<_PresenceLifecycle>
     if (ref.read(currentSessionProvider) == null) return;
     switch (state) {
       case AppLifecycleState.resumed:
-        ref.read(presenceControllerProvider).goOnline();
+        // Force the access token fresh before anything realtime-related
+        // (presence, message/call streams) tries to reconnect — see
+        // AuthRepository.refreshSessionIfNeeded for why this has to run
+        // first, not just rely on the SDK's background auto-refresh timer.
+        ref.read(authRepositoryProvider).refreshSessionIfNeeded().then((_) {
+          ref.read(presenceControllerProvider).goOnline();
+        });
         break;
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:

@@ -13,6 +13,33 @@ class AuthRepository {
   Session? get currentSession => _client.auth.currentSession;
   User? get currentUser => _client.auth.currentUser;
 
+  /// supabase_flutter's own auto-refresh timer can be throttled while the
+  /// app is backgrounded (Android Doze, iOS suspension), so a long
+  /// background period can leave `currentSession` holding an
+  /// already-expired access token in memory. That's what surfaces as
+  /// `InvalidJWTToken: Token has expired` on the next Realtime channel
+  /// subscribe attempt — the channel authenticates with whatever token is
+  /// currently in the session, stale or not. Called from the app-resume
+  /// hook (`main.dart`'s `_PresenceLifecycleState`) before anything
+  /// realtime-related reconnects, so the token is forced fresh first.
+  Future<void> refreshSessionIfNeeded() async {
+    final session = _client.auth.currentSession;
+    final expiresAt = session?.expiresAt;
+    if (session == null || expiresAt == null) return;
+    final expiresAtDate = DateTime.fromMillisecondsSinceEpoch(
+      expiresAt * 1000,
+    );
+    if (DateTime.now()
+        .isBefore(expiresAtDate.subtract(const Duration(seconds: 30)))) {
+      return;
+    }
+    try {
+      await _client.auth.refreshSession();
+    } on AuthException catch (e) {
+      throw AuthFailure(e.message);
+    }
+  }
+
   Future<void> signUpWithEmail({
     required String email,
     required String password,

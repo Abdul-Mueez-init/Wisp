@@ -33,17 +33,45 @@ dependencies:
   image_picker: ^1.1.2
   
   uuid: ^4.5.1
-  file_picker: ^8.1.2      # NEW — Batch 5b: document picking
+  file_picker: ^10.3.10     # Batch 5b: document picking — bumped from 8.1.2, which
+                            # hardcodes compileSdk 34 and breaks the build once any
+                            # other plugin (flutter_plugin_android_lifecycle, pulled
+                            # in transitively) requires compileSdk 36. 10.3.10 fixes
+                            # compileSdk (landed 10.3.7) and keeps FilePicker.platform
+                            # working (10.3.9 briefly dropped it, reverted in 10.3.10) —
+                            # no API changes needed in chat_input_bar.dart. Caret pin
+                            # deliberately stays under 11.0.0, which removes .platform
+                            # and changes pickFiles()'s return type entirely.
   video_player: ^2.9.2     # NEW — Batch 5b: video playback
   url_launcher: ^6.3.2     # NEW — Batch 5b: open/download documents
  
-  record: ^5.2.1            # NEW — Batch 5c: voice note recording
+  record: ^6.2.1             # Batch 5c: voice note recording — bumped from 5.2.1,
+                              # whose transitive record_linux (0.7.2) never implemented
+                              # newer abstract members added to record_platform_interface
+                              # (1.6.0 got pulled in by record_android/record_web being
+                              # newer). Broke compilation on every platform, not just
+                              # Linux, because record_linux.dart sits behind an
+                              # io-conditional import that Dart still typechecks
+                              # regardless of build target. 6.2.1 is the last release
+                              # before v7 raises the Flutter/Dart SDK floor further —
+                              # no other code changes needed, AudioRecorder's facade API
+                              # (hasPermission/start/stop/onAmplitudeChanged/dispose) is
+                              # unchanged from 5.x.
   just_audio: ^0.9.42       # NEW — Batch 5c: voice note playback
   geolocator: ^14.0.2
   flutter_map: ^8.3.1
   latlong2: ^0.10.1
  
-  flutter_webrtc: ^0.11.7   # NEW — Phase 10: WebRTC peer connections for audio/video calls
+  flutter_webrtc: ">=0.12.12+hotfix.1 <0.13.0"   # Phase 10: WebRTC peer connections —
+                              # bumped from 0.11.7, which still has Android v1-embedding
+                              # code (PluginRegistry.Registrar) that was fully removed
+                              # from the current Flutter SDK, causing a hard javac error.
+                              # 0.12.12+hotfix.1 already proved out clean (compiled with
+                              # only deprecation warnings) in an earlier build where the
+                              # stale lockfile had resolved it. Staying on 0.x rather than
+                              # jumping to the new 1.x stable line to avoid an API surface
+                              # change across call_repository/signaling_repository/
+                              # webrtc_session/call_screen.
  
 dev_dependencies:
   flutter_test:

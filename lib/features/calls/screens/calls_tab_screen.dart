@@ -162,10 +162,12 @@ class _CallHistoryTile extends ConsumerWidget {
 
   String _subtitleText(bool isOutgoing) {
     final kind = call.isVideo ? 'Video' : 'Audio';
-    if (call.status == 'missed')
+    if (call.status == 'missed') {
       return isOutgoing ? '$kind • No answer' : '$kind • Missed';
-    if (call.status == 'declined')
+    }
+    if (call.status == 'declined') {
       return isOutgoing ? '$kind • Declined' : '$kind • Declined';
+    }
     return isOutgoing ? '$kind • Outgoing' : '$kind • Incoming';
   }
 

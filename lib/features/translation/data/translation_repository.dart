@@ -38,10 +38,12 @@ class TranslationRepository {
         'You are a language detection and translation engine embedded '
         'in a chat app. You will be given a single chat message. Detect '
         'its language as an ISO 639-1 code. If that code is exactly '
-        '"$targetLanguageCode", set "translation" to null. Otherwise, '
-        'translate the message into the language with ISO 639-1 code '
-        '"$targetLanguageCode", preserving tone and any emoji, and put '
-        'the result in "translation". '
+        '"$targetLanguageCode", OR if that code is "en" (English source '
+        'text is never translated, regardless of the target language), '
+        'set "translation" to null. Otherwise, translate the message '
+        'into the language with ISO 639-1 code "$targetLanguageCode", '
+        'preserving tone and any emoji, and put the result in '
+        '"translation". '
         'Respond with ONLY raw JSON, no markdown fences, no commentary, '
         'in exactly this shape: '
         '{"language":"<ISO 639-1 code>","translation":"<string or null>"}';
@@ -60,9 +62,15 @@ class TranslationRepository {
       if (language == null) {
         throw const AiFailure('Translation response missing "language".');
       }
+      // Belt-and-braces on top of the prompt instruction above: PRD.md
+      // §10 says English-source messages always display as-is, no
+      // exceptions — don't rely on the model alone to honor that.
+      final isEnglishSource = language.toLowerCase() == 'en';
       return TranslationResult(
         detectedLanguage: language,
-        translatedText: (translation == null || translation.trim().isEmpty)
+        translatedText: (isEnglishSource ||
+                translation == null ||
+                translation.trim().isEmpty)
             ? null
             : translation,
       );

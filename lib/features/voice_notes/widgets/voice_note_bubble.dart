@@ -195,10 +195,10 @@ class _VoiceNoteBubbleState extends ConsumerState<VoiceNoteBubble> {
                     child: Text(
                       // Safe: this branch only builds when
                       // hasTranscript is true, which already
-                      // guarantees transcript is non-null — Dart just
-                      // doesn't carry that promotion through a
-                      // separately-computed bool.
-                      transcript!,
+                      // guarantees transcript is non-null — Dart's
+                      // flow analysis promotes it in this scope, so
+                      // no `!` is needed here.
+                      transcript,
                       style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                             color: textColor.withValues(alpha: 0.85),
                             height: 1.4,

@@ -1,8 +1,7 @@
 import 'dart:typed_data';
-
-import 'package:google_generative_ai/google_generative_ai.dart';
-import 'package:http/http.dart' as http;
 import 'dart:convert';
+
+import 'package:http/http.dart' as http;
 
 import '../core/errors/failure.dart';
 
@@ -12,10 +11,27 @@ import '../core/errors/failure.dart';
 /// AiConfig methods only — never instantiate Gemini/Groq SDKs directly
 /// (rules.md Rule 8).
 ///
-/// NOTE: this is the Phase 0 skeleton per plan.md ("fallback logic
-/// stubbed"). Feature-specific prompt construction (translation prompts,
-/// agent context-window assembly, voice transcription/action-extraction
-/// prompts) is intentionally NOT here — those land in Phases 7/8/9.
+/// Bugfix (post-Phase-11, live-outage triage): both models this file
+/// previously pointed at were dead — `gemini-1.5-flash` 404s on every
+/// call (the entire Gemini 1.0/1.5 family has been fully shut down by
+/// Google) and Groq deprecated `llama-3.1-8b-instant` June 17, 2026.
+/// Every call site already wraps `AiConfig` calls in a silent catch
+/// (so as not to block message send on a translation/agent/transcription
+/// failure), which is exactly why this looked like "the AI features were
+/// never built" instead of a loud error. Also dropped the
+/// `google_generative_ai` package entirely — it's deprecated and archived
+/// upstream in favor of `firebase_ai`, which needs a full Firebase project
+/// wired up (too heavy a lift for a model-string fix). Google's own docs
+/// confirm the plain REST `generateContent` endpoint "remains fully
+/// supported" even after their newer Interactions API, so this file now
+/// calls it directly with the `http` package already used for Groq below
+/// — no new dependency, no Firebase setup, still zero-cost.
+/// Current replacements (verified against Google's/Groq's live docs,
+/// Aug 2026): `gemini-3.5-flash` (free-tier, multimodal — text, image,
+/// video, audio, PDF in, text out) and Groq's `openai/gpt-oss-20b`
+/// (Groq's own recommended migration target for the retired 3.1-8b-instant,
+/// also free-tier, same OpenAI-compatible chat-completions shape so no
+/// request-building changes were needed there).
 class AiConfig {
   AiConfig._();
 
@@ -23,8 +39,10 @@ class AiConfig {
   static late final String _groqApiKey;
   static bool _initialized = false;
 
-  static const String _geminiModel = 'gemini-1.5-flash';
-  static const String _groqModel = 'llama-3.1-8b-instant';
+  static const String _geminiModel = 'gemini-3.5-flash';
+  static const String _geminiEndpoint =
+      'https://generativelanguage.googleapis.com/v1beta/models/$_geminiModel:generateContent';
+  static const String _groqModel = 'openai/gpt-oss-20b';
   static const String _groqEndpoint =
       'https://api.groq.com/openai/v1/chat/completions';
 
@@ -74,22 +92,71 @@ class AiConfig {
     }
   }
 
+  /// Plain REST call to Gemini's `generateContent` endpoint. [extraParts]
+  /// lets [generateFromAudio] attach an inline-data part (audio bytes)
+  /// alongside the text prompt — both text-only and audio-plus-text
+  /// requests share this one implementation, same as the old SDK call
+  /// handled both via `Content.text`/`Content.multi`.
   static Future<String> _callGemini({
     required String prompt,
     String? systemInstruction,
+    List<Map<String, dynamic>>? extraParts,
   }) async {
-    final model = GenerativeModel(
-      model: _geminiModel,
-      apiKey: _geminiApiKey,
-      systemInstruction:
-          systemInstruction != null ? Content.system(systemInstruction) : null,
+    final body = <String, dynamic>{
+      'contents': [
+        {
+          'parts': [
+            {'text': prompt},
+            ...?extraParts,
+          ],
+        },
+      ],
+      if (systemInstruction != null)
+        'systemInstruction': {
+          'parts': [
+            {'text': systemInstruction},
+          ],
+        },
+    };
+
+    final response = await http.post(
+      Uri.parse(_geminiEndpoint),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': _geminiApiKey,
+      },
+      body: jsonEncode(body),
     );
-    final response = await model.generateContent([Content.text(prompt)]);
-    final text = response.text;
+
+    if (response.statusCode != 200) {
+      throw AiFailure(
+        'Gemini call failed with status ${response.statusCode}: ${response.body}',
+      );
+    }
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final text = _extractGeminiText(decoded);
     if (text == null || text.isEmpty) {
       throw AiFailure('Gemini returned an empty response.');
     }
     return text;
+  }
+
+  /// Concatenates every text part of the first candidate — mirrors what
+  /// the old SDK's `response.text` convenience getter did under the hood,
+  /// since a JSON-mode response can occasionally split across parts.
+  static String? _extractGeminiText(Map<String, dynamic> decoded) {
+    final candidates = decoded['candidates'] as List<dynamic>?;
+    if (candidates == null || candidates.isEmpty) return null;
+    final content = candidates[0]['content'] as Map<String, dynamic>?;
+    final parts = content?['parts'] as List<dynamic>?;
+    if (parts == null) return null;
+    final buffer = StringBuffer();
+    for (final part in parts) {
+      final text = (part as Map<String, dynamic>)['text'] as String?;
+      if (text != null) buffer.write(text);
+    }
+    return buffer.toString();
   }
 
   static Future<String> _callGroq({
@@ -139,18 +206,17 @@ class AiConfig {
   }) async {
     _assertInitialized();
     try {
-      final model = GenerativeModel(model: _geminiModel, apiKey: _geminiApiKey);
-      final response = await model.generateContent([
-        Content.multi([
-          TextPart(prompt),
-          DataPart(mimeType, audioBytes),
-        ]),
-      ]);
-      final text = response.text;
-      if (text == null || text.isEmpty) {
-        throw AiFailure('Gemini audio call returned an empty response.');
-      }
-      return text;
+      return await _callGemini(
+        prompt: prompt,
+        extraParts: [
+          {
+            'inlineData': {
+              'mimeType': mimeType,
+              'data': base64Encode(audioBytes),
+            },
+          },
+        ],
+      );
     } catch (e) {
       throw AiFailure('Gemini audio transcription failed: $e');
     }

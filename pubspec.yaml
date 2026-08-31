@@ -22,10 +22,13 @@ dependencies:
   # Env config
   flutter_dotenv: ^5.1.0
  
-  # AI (Gemini primary)
-  google_generative_ai: ^0.4.6
- 
-  # AI (Groq fallback — no official SDK, plain REST via http)
+  # pubspec.yaml — dependencies section, updated:
+
+  # AI (Gemini + Groq — no official SDK for either anymore; both fully
+  # REST via http. google_generative_ai was removed here — see
+  # ai_config.dart's doc comment: it's deprecated/archived upstream in
+  # favor of firebase_ai, which needs a full Firebase project wired up,
+  # too heavy a lift just to fix a dead model string.)
   http: ^1.6.0
  
   cupertino_icons: ^1.0.8

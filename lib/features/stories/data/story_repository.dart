@@ -105,7 +105,7 @@ class StoryRepository {
       final rows = await _client
           .from('stories')
           .select('*, profiles!inner(*), story_views(viewer_id)')
-          .order('created_at');
+          .order('created_at', ascending: true);
 
       final now = DateTime.now();
       final byUser = <String, List<Map<String, dynamic>>>{};

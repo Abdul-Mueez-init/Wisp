@@ -176,10 +176,14 @@ class CallController extends Notifier<CallSessionState> {
     if (state.phase != CallPhase.incomingRinging) return;
     final call = state.call;
     if (call != null) {
-      await ref
-          .read(callRepositoryProvider)
-          .updateStatus(callId: call.id, status: 'declined');
-      await _signaling?.sendHangup();
+      try {
+        await ref
+            .read(callRepositoryProvider)
+            .updateStatus(callId: call.id, status: 'declined');
+      } catch (_) {
+        // Best-effort — see endCall().
+      }
+      await _sendHangupBestEffort();
     }
     await _endLocally();
   }
@@ -197,12 +201,21 @@ class CallController extends Notifier<CallSessionState> {
     final call = state.call;
     if (call != null) {
       final reachedActive = state.phase == CallPhase.active;
-      await ref.read(callRepositoryProvider).updateStatus(
-            callId: call.id,
-            status: reachedActive ? 'ended' : 'missed',
-            setEndedNow: reachedActive,
-          );
-      await _signaling?.sendHangup();
+      try {
+        await ref.read(callRepositoryProvider).updateStatus(
+              callId: call.id,
+              status: reachedActive ? 'ended' : 'missed',
+              setEndedNow: reachedActive,
+            );
+      } catch (_) {
+        // Best-effort — see _sendHangupBestEffort's doc comment. The
+        // call must end on THIS device regardless of whether the
+        // shared history row could be written (bad network, a stale
+        // token, etc.); leaving the screen stuck waiting on that write
+        // is worse than a call-history row briefly out of sync with
+        // what actually happened locally.
+      }
+      await _sendHangupBestEffort();
     }
     await _endLocally();
   }
@@ -231,6 +244,17 @@ class CallController extends Notifier<CallSessionState> {
   }
 
   Future<void> switchCamera() => _session?.switchCamera() ?? Future.value();
+
+  /// Best-effort hangup broadcast, bounded so a stuck signaling socket
+  /// can never block Cancel/End from completing locally. Not fatal if
+  /// it fails or times out either way — the peer also detects the
+  /// dropped RTCPeerConnection via [_onPeerConnectionStateChanged] and
+  /// ends locally on its own.
+  Future<void> _sendHangupBestEffort() async {
+    try {
+      await _signaling?.sendHangup().timeout(const Duration(seconds: 3));
+    } catch (_) {}
+  }
 
   // ---------------------------------------------------------------
   // Internals
@@ -276,10 +300,27 @@ class CallController extends Notifier<CallSessionState> {
     _pendingOffer = null;
     _watchedIncomingCallId = null;
 
-    await _session?.dispose();
+    // flutter_webrtc's native teardown (RTCPeerConnection.close/dispose,
+    // track.stop()) and the signaling channel's removeChannel call are
+    // both plugin/socket calls that can occasionally hang on-device
+    // rather than throw. Timing each out means a stuck native call can
+    // never again leave Cancel/End looking "jammed" — the call always
+    // finishes ending locally within a few seconds, worst case.
+    final session = _session;
     _session = null;
-    await _signaling?.dispose();
+    if (session != null) {
+      try {
+        await session.dispose().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+    }
+
+    final signaling = _signaling;
     _signaling = null;
+    if (signaling != null) {
+      try {
+        await signaling.dispose().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+    }
   }
 }
 

@@ -290,6 +290,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                             ? senderNames[message.senderId]
                             : null;
                     return MessageBubble(
+                      key: ValueKey(message.id),
                       message: message,
                       isMine: isMine,
                       status: status,

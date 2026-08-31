@@ -73,7 +73,7 @@ class GroupRepository {
           .from('conversation_members')
           .select('id, conversation_id, role, joined_at, profiles!inner(*)')
           .eq('conversation_id', conversationId)
-          .order('joined_at');
+          .order('joined_at', ascending: true);
       return (rows as List)
           .map((r) =>
               ConversationMember.fromJoinedJson(r as Map<String, dynamic>))

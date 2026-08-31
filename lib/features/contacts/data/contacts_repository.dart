@@ -25,7 +25,7 @@ class ContactsRepository {
           .select()
           .ilike('username', '%$trimmed%')
           .neq('id', excludeUserId)
-          .order('username')
+          .order('username', ascending: true)
           .limit(20);
       return (rows as List)
           .map((row) => Profile.fromJson(row as Map<String, dynamic>))

@@ -38,6 +38,10 @@ class CallScreen extends ConsumerWidget {
         : null;
     final otherName =
         otherProfile?.displayName ?? otherProfile?.username ?? 'Wisp user';
+    final rawAvatarPath = otherProfile?.avatarUrl;
+    final otherAvatarUrl = rawAvatarPath != null
+        ? ref.read(profileRepositoryProvider).resolveAvatarUrl(rawAvatarPath)
+        : null;
 
     return PopScope(
       canPop: false,
@@ -48,10 +52,12 @@ class CallScreen extends ConsumerWidget {
             CallPhase.active => _ActiveCallView(
                 callState: callState,
                 otherName: otherName,
+                otherAvatarUrl: otherAvatarUrl,
               ),
             _ => _RingingOrConnectingView(
                 callState: callState,
                 otherName: otherName,
+                otherAvatarUrl: otherAvatarUrl,
               ),
           },
         ),
@@ -66,10 +72,12 @@ class _RingingOrConnectingView extends ConsumerWidget {
   const _RingingOrConnectingView({
     required this.callState,
     required this.otherName,
+    required this.otherAvatarUrl,
   });
 
   final CallSessionState callState;
   final String otherName;
+  final String? otherAvatarUrl;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -82,16 +90,29 @@ class _RingingOrConnectingView extends ConsumerWidget {
       _ => '',
     };
 
+    // The caller's mic is already live at this point — startCall() calls
+    // session.init() (which grabs the mic) before the offer is even
+    // sent, so muting while it's still ringing is functionally real,
+    // not cosmetic. The callee side has no session yet until they tap
+    // Accept, so there's nothing to mute during incomingRinging.
+    final hasLiveSession =
+        ref.read(callControllerProvider.notifier).session != null;
+
     return Column(
       children: [
         const Spacer(flex: 2),
         CircleAvatar(
           radius: 56,
           backgroundColor: AppColors.surfaceContainerHigh,
-          child: Text(
-            otherName.isNotEmpty ? otherName[0].toUpperCase() : '?',
-            style: const TextStyle(fontSize: 40, color: AppColors.primary),
-          ),
+          backgroundImage:
+              otherAvatarUrl != null ? NetworkImage(otherAvatarUrl!) : null,
+          child: otherAvatarUrl == null
+              ? Text(
+                  otherName.isNotEmpty ? otherName[0].toUpperCase() : '?',
+                  style:
+                      const TextStyle(fontSize: 40, color: AppColors.primary),
+                )
+              : null,
         ),
         const SizedBox(height: AppSpacing.stackDefault),
         Text(
@@ -117,7 +138,11 @@ class _RingingOrConnectingView extends ConsumerWidget {
             CallPhase.incomingRinging => _IncomingActionRow(
                 ref: ref,
               ),
-            _ => _CancelActionRow(ref: ref),
+            _ => _CancelActionRow(
+                ref: ref,
+                showMute: hasLiveSession,
+                isMuted: callState.isMuted,
+              ),
           },
         ),
       ],
@@ -153,16 +178,41 @@ class _IncomingActionRow extends StatelessWidget {
 }
 
 class _CancelActionRow extends StatelessWidget {
-  const _CancelActionRow({required this.ref});
+  const _CancelActionRow({
+    required this.ref,
+    required this.showMute,
+    required this.isMuted,
+  });
   final WidgetRef ref;
+  final bool showMute;
+  final bool isMuted;
 
   @override
   Widget build(BuildContext context) {
-    return _CallActionButton(
-      icon: Icons.call_end,
-      backgroundColor: AppColors.error,
-      onTap: () => ref.read(callControllerProvider.notifier).endCall(),
-      label: 'Cancel',
+    if (!showMute) {
+      return _CallActionButton(
+        icon: Icons.call_end,
+        backgroundColor: AppColors.error,
+        onTap: () => ref.read(callControllerProvider.notifier).endCall(),
+        label: 'Cancel',
+      );
+    }
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        _CallActionButton(
+          icon: isMuted ? Icons.mic_off : Icons.mic,
+          backgroundColor: AppColors.surfaceContainerHigh,
+          onTap: () => ref.read(callControllerProvider.notifier).toggleMute(),
+          label: isMuted ? 'Unmute' : 'Mute',
+        ),
+        _CallActionButton(
+          icon: Icons.call_end,
+          backgroundColor: AppColors.error,
+          onTap: () => ref.read(callControllerProvider.notifier).endCall(),
+          label: 'Cancel',
+        ),
+      ],
     );
   }
 }
@@ -171,10 +221,15 @@ class _CancelActionRow extends StatelessWidget {
 /// self-view) for video calls, a plain avatar for audio calls, plus
 /// mute/camera/end controls per design.md's Buttons/Status tokens.
 class _ActiveCallView extends ConsumerWidget {
-  const _ActiveCallView({required this.callState, required this.otherName});
+  const _ActiveCallView({
+    required this.callState,
+    required this.otherName,
+    required this.otherAvatarUrl,
+  });
 
   final CallSessionState callState;
   final String otherName;
+  final String? otherAvatarUrl;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -197,13 +252,18 @@ class _ActiveCallView extends ConsumerWidget {
                       CircleAvatar(
                         radius: 56,
                         backgroundColor: AppColors.surfaceContainerHigh,
-                        child: Text(
-                          otherName.isNotEmpty
-                              ? otherName[0].toUpperCase()
-                              : '?',
-                          style: const TextStyle(
-                              fontSize: 40, color: AppColors.primary),
-                        ),
+                        backgroundImage: otherAvatarUrl != null
+                            ? NetworkImage(otherAvatarUrl!)
+                            : null,
+                        child: otherAvatarUrl == null
+                            ? Text(
+                                otherName.isNotEmpty
+                                    ? otherName[0].toUpperCase()
+                                    : '?',
+                                style: const TextStyle(
+                                    fontSize: 40, color: AppColors.primary),
+                              )
+                            : null,
                       ),
                       const SizedBox(height: AppSpacing.stackDefault),
                       Text(

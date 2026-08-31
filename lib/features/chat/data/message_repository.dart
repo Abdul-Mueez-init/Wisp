@@ -16,12 +16,21 @@ class MessageRepository {
   /// `.stream()` is documented to misbehave with more than one chained
   /// filter, so conversation scoping is the only server-side filter and
   /// ordering/mapping happens after.
+  ///
+  /// `ascending: true` is NOT optional here despite reading like the
+  /// obvious default — postgrest-dart's `order()` defaults to
+  /// `ascending: false` (descending) when unspecified. Omitting it was
+  /// the actual root cause of a message-ordering bug: this call was
+  /// silently returning newest-first, which `ChatDetailScreen`'s
+  /// `.reversed` + `ListView.builder(reverse: true)` (itself correct)
+  /// then inverted a second time, putting the newest message at the
+  /// top of the chat instead of the bottom.
   Stream<List<Message>> watchMessages(String conversationId) {
     return _client
         .from('messages')
         .stream(primaryKey: ['id'])
         .eq('conversation_id', conversationId)
-        .order('created_at')
+        .order('created_at', ascending: true)
         .map((rows) => rows.map(Message.fromJson).toList());
   }
 

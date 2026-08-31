@@ -259,6 +259,17 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
             child: messagesAsync.when(
               data: (messages) {
                 if (messages.isEmpty) {
+                  if (widget.isAiConversation) {
+                    return _AiWelcomeView(
+                      onSuggestionTap: (text) => ref
+                          .read(sendMessageControllerProvider.notifier)
+                          .sendText(
+                            conversationId: widget.conversationId,
+                            content: text,
+                            isAiConversation: true,
+                          ),
+                    );
+                  }
                   return Center(
                     child: Text(
                       'Say hi 👋',
@@ -520,5 +531,112 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     return (name != null && name.isNotEmpty)
         ? name.substring(0, 1).toUpperCase()
         : '?';
+  }
+}
+
+/// Phase 8 — shown only when the AI conversation has zero messages yet
+/// (the same screen switches to the ordinary bubble list the moment a
+/// first message exists, per `messagesAsync`'s realtime stream — no
+/// separate route). Mirrors WhatsApp's "Ask Meta AI" landing screen:
+/// a greeting plus a handful of tappable suggestions that send
+/// immediately as the first message, using the exact same
+/// `SendMessageController.sendText(isAiConversation: true)` path a
+/// typed message would use — this widget only supplies the text.
+class _AiWelcomeView extends StatelessWidget {
+  const _AiWelcomeView({required this.onSuggestionTap});
+
+  final ValueChanged<String> onSuggestionTap;
+
+  static const _suggestions = <(IconData, String)>[
+    (Icons.summarize_outlined, 'Summarize my recent chats'),
+    (Icons.edit_note_outlined, 'Help me draft a reply'),
+    (Icons.chat_bubble_outline, 'Give me a good icebreaker'),
+    (Icons.lightbulb_outline, 'Explain something to me'),
+    (Icons.celebration_outlined, 'Tell me something fun'),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.pageMargin,
+        vertical: 24,
+      ),
+      children: [
+        const SizedBox(height: 24),
+        const CircleAvatar(
+          radius: 32,
+          backgroundColor: AppColors.primaryContainer,
+          child: Icon(Icons.auto_awesome, size: 32, color: AppColors.primary),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'Hi, I\'m Wisp AI',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.headlineMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Ask me anything, or try one of these',
+          textAlign: TextAlign.center,
+          style: Theme.of(context)
+              .textTheme
+              .bodyMedium
+              ?.copyWith(color: AppColors.onSurfaceVariant),
+        ),
+        const SizedBox(height: 24),
+        for (final (icon, label) in _suggestions)
+          Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.stackDefault),
+            child: _SuggestionChip(
+              icon: icon,
+              label: label,
+              onTap: () => onSuggestionTap(label),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _SuggestionChip extends StatelessWidget {
+  const _SuggestionChip({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(AppRadius.buttonInput),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadius.buttonInput),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.paddingBubbleX,
+            vertical: AppSpacing.paddingBubbleY,
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 20, color: AppColors.primary),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  style: Theme.of(context).textTheme.bodyLarge,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

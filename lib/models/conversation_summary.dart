@@ -20,7 +20,18 @@ class ConversationSummary {
     this.lastMessage,
   });
 
+  /// Phase 8 — derived, not stored (per `ConversationRepository
+  /// .findOrCreateAiConversation`'s doc comment: the AI-DM thread is an
+  /// ordinary `type: 'direct'` conversation whose *only*
+  /// `conversation_members` row is the user themself). A real
+  /// human-to-human direct conversation always has an `otherProfile`
+  /// resolved by `getOtherDirectMember`; the reserved AI thread never
+  /// does, since there's no second member to find. That gap is exactly
+  /// what identifies it here — no new column, no schema change.
+  bool get isAiConversation => conversation.isDirect && otherProfile == null;
+
   String get displayName {
+    if (isAiConversation) return 'Wisp AI';
     if (conversation.isGroup) return conversation.name ?? 'Group';
     return otherProfile?.displayName ?? otherProfile?.username ?? 'Unknown';
   }

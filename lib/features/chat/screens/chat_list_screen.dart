@@ -15,12 +15,60 @@ import '../providers/presence_provider.dart';
 /// missing since Phase 2/3 (context.md open issues). design.md "Lists"
 /// component: avatar left, two lines of text (name / preview), 1px
 /// Laurel Green divider at 10% opacity between rows.
+///
+/// Phase 8 addition: a pinned "Wisp AI" tile (WhatsApp's "Meta AI" row
+/// pattern) always renders first, plus an "Ask Wisp AI" FAB — both are
+/// just two doors into the same reserved AI-DM conversation
+/// (`ConversationRepository.findOrCreateAiConversation`). The tile is
+/// rendered independently of `myConversationSummariesProvider`'s
+/// loading/error states so it's never blocked behind the regular list
+/// finishing its fetch (PRD.md "must feel instant").
 class ChatListScreen extends ConsumerWidget {
   const ChatListScreen({super.key});
+
+  /// Shared by both the pinned tile and the FAB — resolves (creating if
+  /// needed) the reserved AI conversation, then navigates into it.
+  /// Mirrors `UserSearchScreen`'s `startDirectConversationWith` flow
+  /// exactly (same controller shape, same error-surfacing pattern).
+  Future<void> _openAiChat(BuildContext context, WidgetRef ref) async {
+    final conversationId = await ref
+        .read(startConversationControllerProvider.notifier)
+        .openAiConversation();
+    if (!context.mounted) return;
+
+    if (conversationId != null) {
+      context.push('/chat/$conversationId?ai=true');
+    } else {
+      final error = ref.read(startConversationControllerProvider).error;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error?.toString() ?? 'Could not open Wisp AI.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final summariesAsync = ref.watch(myConversationSummariesProvider);
+    final openingAiChat =
+        ref.watch(startConversationControllerProvider).isLoading;
+
+    // The AI thread only exists as a real `conversations` row once
+    // opened at least once (`findOrCreateAiConversation` is lazy) — so
+    // its preview/timestamp are optional extras layered onto an always-
+    // present pinned tile, not a precondition for showing it at all.
+    final allSummaries = summariesAsync.value ?? const <ConversationSummary>[];
+    ConversationSummary? aiSummary;
+    final otherSummaries = <ConversationSummary>[];
+    for (final s in allSummaries) {
+      if (s.isAiConversation) {
+        aiSummary = s;
+      } else {
+        otherSummaries.add(s);
+      }
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -40,25 +88,114 @@ class ChatListScreen extends ConsumerWidget {
       ),
       body: RefreshIndicator(
         onRefresh: () => ref.refresh(myConversationSummariesProvider.future),
-        child: summariesAsync.when(
-          loading: () =>
-              const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-          error: (e, _) => _ErrorState(message: '$e'),
-          data: (summaries) {
-            if (summaries.isEmpty) return const _EmptyState();
-            return ListView.separated(
-              itemCount: summaries.length,
-              separatorBuilder: (_, __) => Divider(
-                height: 1,
-                indent: 84,
-                color: AppColors.outlineVariant.withValues(alpha: 0.1),
+        child: ListView(
+          children: [
+            _AiChatTile(
+              summary: aiSummary,
+              onTap: () => _openAiChat(context, ref),
+            ),
+            Divider(
+              height: 1,
+              indent: 84,
+              color: AppColors.outlineVariant.withValues(alpha: 0.1),
+            ),
+            summariesAsync.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: 32),
+                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
               ),
-              itemBuilder: (context, i) => _ChatListTile(summary: summaries[i]),
-            );
-          },
+              error: (e, _) => _ErrorState(message: '$e'),
+              data: (_) {
+                if (otherSummaries.isEmpty) return const _EmptyState();
+                return ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: otherSummaries.length,
+                  separatorBuilder: (_, __) => Divider(
+                    height: 1,
+                    indent: 84,
+                    color: AppColors.outlineVariant.withValues(alpha: 0.1),
+                  ),
+                  itemBuilder: (context, i) =>
+                      _ChatListTile(summary: otherSummaries[i]),
+                );
+              },
+            ),
+          ],
         ),
       ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: openingAiChat ? null : () => _openAiChat(context, ref),
+        backgroundColor: AppColors.primaryContainer,
+        foregroundColor: AppColors.primary,
+        icon: openingAiChat
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: AppColors.primary),
+              )
+            : const Icon(Icons.auto_awesome),
+        label: const Text('Ask Wisp AI'),
+      ),
     );
+  }
+}
+
+/// The pinned "Wisp AI" row — same avatar/icon treatment as
+/// `ChatDetailScreen`'s AppBar for the AI conversation
+/// (`AppColors.primaryContainer` + `Icons.auto_awesome`), so the two
+/// entry points read as clearly the same destination. Always rendered,
+/// whether or not the AI conversation has been opened/created yet.
+class _AiChatTile extends StatelessWidget {
+  const _AiChatTile({required this.summary, required this.onTap});
+
+  /// Null until the user has opened the AI chat at least once — the
+  /// tile still renders with a placeholder subtitle in that case.
+  final ConversationSummary? summary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.pageMargin, vertical: 4),
+      onTap: onTap,
+      leading: const CircleAvatar(
+        radius: 28,
+        backgroundColor: AppColors.primaryContainer,
+        child: Icon(Icons.auto_awesome, color: AppColors.primary),
+      ),
+      title: Text(
+        'Wisp AI',
+        style: Theme.of(context).textTheme.titleMedium,
+      ),
+      subtitle: Text(
+        summary?.lastMessage != null
+            ? _previewText(summary!.lastMessage!)
+            : 'Ask me anything ✨',
+        style: Theme.of(context).textTheme.bodyMedium,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: summary?.lastMessage != null
+          ? Text(
+              formatChatTimestamp(summary!.lastMessage!.createdAt),
+              style: Theme.of(context).textTheme.labelSmall,
+            )
+          : null,
+    );
+  }
+
+  String _previewText(Message message) {
+    switch (message.type) {
+      case 'text':
+        return message.content ?? '';
+      case 'voice':
+        return '🎤 Voice message';
+      default:
+        return message.content ?? '';
+    }
   }
 }
 
@@ -176,14 +313,12 @@ class _EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.pageMargin),
-        child: Text(
-          'No chats yet. Tap the search icon above to find someone to message.',
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.pageMargin * 2),
+      child: Text(
+        'No chats yet. Tap the search icon above to find someone to message.',
+        textAlign: TextAlign.center,
+        style: Theme.of(context).textTheme.bodyMedium,
       ),
     );
   }
@@ -195,14 +330,12 @@ class _ErrorState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.pageMargin),
-        child: Text(
-          message,
-          style: const TextStyle(color: AppColors.error),
-          textAlign: TextAlign.center,
-        ),
+    return Padding(
+      padding: const EdgeInsets.all(AppSpacing.pageMargin),
+      child: Text(
+        message,
+        style: const TextStyle(color: AppColors.error),
+        textAlign: TextAlign.center,
       ),
     );
   }

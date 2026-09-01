@@ -50,4 +50,10 @@ class TypingRepository {
     if (updatedAt == null) return false;
     return DateTime.now().difference(updatedAt) < staleAfter;
   }
+
+  /// its row) is filtered client-side by [TypingRepository.isFresh] via
+  /// callers — a single `.eq()` filter is used here deliberately (the
+  /// same `.stream()` chained-filter caveat `MessageRepository` used to
+  /// document). `typing_status` is small and ephemeral by nature, so
+  /// unlike `messages` it wasn't in scope for Phase D's pagination work.
 }

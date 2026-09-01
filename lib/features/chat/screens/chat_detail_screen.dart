@@ -18,6 +18,8 @@ import '../../location/providers/location_provider.dart';
 import '../../location/providers/live_location_provider.dart';
 import '../../ai_agent/providers/ai_agent_provider.dart';
 import '../../calls/providers/call_controller.dart';
+// You may need to add this import if it's not exported elsewhere:
+// import '../providers/chat_messages_controller.dart';
 
 /// Phase 2 1-on-1 chat core, extended in Phase 3 to also render group
 /// conversations (plan.md: "Group chat detail screen (reuses chat core
@@ -71,8 +73,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   }
 
   /// Only re-runs the sync if the newest message in the conversation
-  /// is one we haven't already synced. [watchMessages] orders
-  /// ascending by `created_at`, so `messages.last` is the newest.
+  /// is one we haven't already synced. `ChatMessagesController`'s state
+  /// keeps `messages` ascending by `created_at` (same ordering the old
+  /// `watchMessages()` stream guaranteed), so `messages.last` is the
+  /// newest.
   void _maybeSyncReadReceipts(List<Message> messages) {
     if (messages.isEmpty) return;
     final newestId = messages.last.id;
@@ -105,9 +109,14 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final myId = ref.watch(currentSessionProvider)?.user.id;
-    final messagesAsync =
-        ref.watch(messagesStreamProvider(widget.conversationId));
+
+    // Phase D (WISP_PERFORMANCE_HANDOFF.md §11) — paginated window +
+    // scoped Realtime merge, replacing the old full-conversation
+    // `messagesStreamProvider` stream. See `ChatMessagesController`.
+    final chatState =
+        ref.watch(chatMessagesControllerProvider(widget.conversationId));
     final sending = ref.watch(sendMessageControllerProvider).isLoading;
+
     final liveLocationState = ref.watch(liveLocationControllerProvider);
     final sharingLiveHere = liveLocationState.isActive &&
         liveLocationState.conversationId == widget.conversationId;
@@ -140,9 +149,9 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
             : '@${m.profile.username}',
     };
 
-    ref.listen(messagesStreamProvider(widget.conversationId), (prev, next) {
-      final messages = next.value;
-      if (messages != null) _maybeSyncReadReceipts(messages);
+    ref.listen(chatMessagesControllerProvider(widget.conversationId),
+        (prev, next) {
+      _maybeSyncReadReceipts(next.messages);
     });
 
     // Phase 4 — presence (direct chats only; groups have no single
@@ -283,9 +292,23 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
       body: Column(
         children: [
           Expanded(
-            child: messagesAsync.when(
-              data: (messages) {
-                if (messages.isEmpty) {
+            child: Builder(
+              builder: (context) {
+                if (chatState.isLoadingInitial) {
+                  return const Center(
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  );
+                }
+                if (chatState.messages.isEmpty && chatState.error != null) {
+                  return Center(
+                    child: Text(
+                      'Could not load messages.\n${chatState.error}',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  );
+                }
+                if (chatState.messages.isEmpty) {
                   if (widget.isAiConversation) {
                     return _AiWelcomeView(
                       onSuggestionTap: (text) => ref
@@ -304,44 +327,65 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                     ),
                   );
                 }
-                final reversed = messages.reversed.toList();
-
-                return ListView.builder(
-                  reverse: true,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: AppSpacing.pageMargin,
-                    vertical: 12,
-                  ),
-                  itemCount: reversed.length,
-                  itemBuilder: (context, index) {
-                    final Message message = reversed[index];
-                    final isMine = message.senderId == myId;
-                    // Status is no longer looked up here — MessageBubble's
-                    // leaf `_StatusTick` resolves it itself via the
-                    // indexed `messageStatusByIdProvider`, so a status
-                    // update no longer has to rebuild this whole list.
-                    final senderLabel =
-                        (isGroup && !isMine && message.senderId != null)
-                            ? senderNames[message.senderId]
-                            : null;
-                    return MessageBubble(
-                      key: ValueKey(message.id),
-                      message: message,
-                      isMine: isMine,
-                      senderLabel: senderLabel,
-                    );
+                final reversed = chatState.messages.reversed.toList();
+                return NotificationListener<ScrollNotification>(
+                  // Phase D (WISP_PERFORMANCE_HANDOFF.md §11) — with
+                  // `reverse: true`, `pixels` approaching
+                  // `maxScrollExtent` is the user scrolling *up* toward
+                  // the oldest loaded message: exactly the moment the
+                  // next page needs to be fetched and prepended.
+                  onNotification: (notification) {
+                    final metrics = notification.metrics;
+                    if (metrics.maxScrollExtent > 0 &&
+                        metrics.pixels >= metrics.maxScrollExtent - 600) {
+                      ref
+                          .read(chatMessagesControllerProvider(
+                                  widget.conversationId)
+                              .notifier)
+                          .loadOlder();
+                    }
+                    return false;
                   },
+                  child: ListView.builder(
+                    reverse: true,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.pageMargin,
+                      vertical: 12,
+                    ),
+                    itemCount:
+                        reversed.length + (chatState.isLoadingMore ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == reversed.length) {
+                        // Older-page loading footer — sits at the far
+                        // (off-screen) end of the reversed list, so it
+                        // never shifts the currently visible bubbles.
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 16),
+                          child: Center(
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        );
+                      }
+                      final Message message = reversed[index];
+                      final isMine = message.senderId == myId;
+                      // Status is no longer looked up here — MessageBubble's
+                      // leaf `_StatusTick` resolves it itself via the
+                      // indexed `messageStatusByIdProvider`, so a status
+                      // update no longer has to rebuild this whole list.
+                      final senderLabel =
+                          (isGroup && !isMine && message.senderId != null)
+                              ? senderNames[message.senderId]
+                              : null;
+                      return MessageBubble(
+                        key: ValueKey(message.id),
+                        message: message,
+                        isMine: isMine,
+                        senderLabel: senderLabel,
+                      );
+                    },
+                  ),
                 );
               },
-              loading: () => const Center(
-                  child: CircularProgressIndicator(strokeWidth: 2)),
-              error: (e, _) => Center(
-                child: Text(
-                  'Could not load messages.\n$e',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-              ),
             ),
           ),
           if (sharingLiveHere)
@@ -559,8 +603,8 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
 
 /// Phase 8 — shown only when the AI conversation has zero messages yet
 /// (the same screen switches to the ordinary bubble list the moment a
-/// first message exists, per `messagesAsync`'s realtime stream — no
-/// separate route). Mirrors WhatsApp's "Ask Meta AI" landing screen:
+/// first message exists, per `chatMessagesControllerProvider`'s live
+/// state — no separate route). Mirrors WhatsApp's "Ask Meta AI" landing screen:
 /// a greeting plus a handful of tappable suggestions that send
 /// immediately as the first message, using the exact same
 /// `SendMessageController.sendText(isAiConversation: true)` path a

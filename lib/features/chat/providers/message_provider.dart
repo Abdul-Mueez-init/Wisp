@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../config/supabase_config.dart';
@@ -12,6 +13,7 @@ import '../../../models/message_status.dart';
 import '../../../models/profile.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../data/media_repository.dart';
+import '../data/message_event.dart';
 import '../data/message_repository.dart';
 import '../providers/conversation_provider.dart';
 import '../../translation/providers/translation_provider.dart';
@@ -27,9 +29,194 @@ final mediaRepositoryProvider = Provider<MediaRepository>((ref) {
   return MediaRepository(SupabaseConfig.client);
 });
 
-final messagesStreamProvider =
-    StreamProvider.family<List<Message>, String>((ref, conversationId) {
-  return ref.watch(messageRepositoryProvider).watchMessages(conversationId);
+/// Phase D (WISP_PERFORMANCE_HANDOFF.md §11) state for one
+/// conversation's message window: a bounded, paginated slice of
+/// history (always oldest-first, same ordering the old
+/// `messagesStreamProvider` guaranteed) plus whatever has arrived live
+/// since the initial page was fetched.
+class ChatMessagesState {
+  const ChatMessagesState({
+    this.messages = const [],
+    this.isLoadingInitial = true,
+    this.isLoadingMore = false,
+    this.hasMore = true,
+    this.error,
+  });
+
+  final List<Message> messages;
+  final bool isLoadingInitial;
+  final bool isLoadingMore;
+  final bool hasMore;
+  final Object? error;
+
+  ChatMessagesState copyWith({
+    List<Message>? messages,
+    bool? isLoadingInitial,
+    bool? isLoadingMore,
+    bool? hasMore,
+    Object? error,
+    bool clearError = false,
+  }) {
+    return ChatMessagesState(
+      messages: messages ?? this.messages,
+      isLoadingInitial: isLoadingInitial ?? this.isLoadingInitial,
+      isLoadingMore: isLoadingMore ?? this.isLoadingMore,
+      hasMore: hasMore ?? this.hasMore,
+      error: clearError ? null : (error ?? this.error),
+    );
+  }
+}
+
+/// Phase D — owns one conversation's paginated message window: an
+/// initial page fetched once via `MessageRepository.fetchRecentMessages`,
+/// older pages fetched on demand as the user scrolls up
+/// (`fetchOlderMessages`), and a conversation-scoped Realtime channel
+/// (`watchConversationEvents`) merging live insert/update/delete events
+/// into that same bounded list. Replaces `messagesStreamProvider`'s old
+/// full-conversation `.stream()`, which re-sent and re-mapped *every*
+/// message in the conversation on every single change.
+class ChatMessagesController extends StateNotifier<ChatMessagesState> {
+  ChatMessagesController(this._repo, this._conversationId)
+      : super(const ChatMessagesState()) {
+    _init();
+  }
+
+  static const _pageSize = 30;
+
+  final MessageRepository _repo;
+  final String _conversationId;
+  RealtimeChannel? _channel;
+
+  Future<void> _init() async {
+    try {
+      final initial = await _repo.fetchRecentMessages(
+        conversationId: _conversationId,
+        limit: _pageSize,
+      );
+      if (mounted) {
+        state = state.copyWith(
+          messages: initial,
+          isLoadingInitial: false,
+          hasMore: initial.length >= _pageSize,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        state = state.copyWith(isLoadingInitial: false, error: e);
+      }
+    }
+    // Subscribed regardless of whether the initial fetch succeeded — a
+    // transient fetch failure shouldn't also cost the live stream, and
+    // the widget can still recover once a first live event arrives.
+    if (mounted) {
+      _channel = _repo.watchConversationEvents(
+        conversationId: _conversationId,
+        onEvent: _applyEvent,
+      );
+    }
+  }
+
+  /// Older page fetched on demand and prepended. Prepending to the
+  /// *start* of this ascending list means it lands at the *end* of
+  /// `ChatDetailScreen`'s `reverse: true` `ListView` (its reversed
+  /// copy) — off-screen above whatever the user is currently looking
+  /// at, so this never disturbs their scroll position the way
+  /// inserting at the visible/newest end would.
+  Future<void> loadOlder() async {
+    if (state.isLoadingMore || !state.hasMore || state.messages.isEmpty) {
+      return;
+    }
+    state = state.copyWith(isLoadingMore: true);
+    try {
+      final oldestLoaded = state.messages.first.createdAt;
+      final older = await _repo.fetchOlderMessages(
+        conversationId: _conversationId,
+        before: oldestLoaded,
+        limit: _pageSize,
+      );
+      if (!mounted) return;
+      state = state.copyWith(
+        messages: [...older, ...state.messages],
+        isLoadingMore: false,
+        hasMore: older.length >= _pageSize,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      state = state.copyWith(isLoadingMore: false, error: e);
+    }
+  }
+
+  void _applyEvent(MessageEvent event) {
+    if (!mounted) return;
+    switch (event.type) {
+      case MessageEventType.insert:
+      case MessageEventType.update:
+        _upsert(event.message!);
+        break;
+      case MessageEventType.delete:
+        state = state.copyWith(
+          messages: state.messages.where((m) => m.id != event.id).toList(),
+        );
+        break;
+    }
+  }
+
+  /// Handles both a brand-new message (insert) and an existing row
+  /// changing in place — Phase 7 translation, Phase 9 voice
+  /// transcription/actions, live-location pin updates: all UPDATEs on a
+  /// row already in [state]'s list — with one code path: replace by id
+  /// if present, otherwise insert in sorted position. Sorted-insert
+  /// (rather than always "append at the end") matters because a live
+  /// insert event can in principle race a `loadOlder()` page that
+  /// hasn't resolved yet; landing in the right spot doesn't depend on
+  /// assuming arrival order.
+  void _upsert(Message message) {
+    final list = [...state.messages];
+    final index = list.indexWhere((m) => m.id == message.id);
+    if (index != -1) {
+      list[index] = message;
+    } else {
+      list.insert(_sortedInsertIndex(list, message), message);
+    }
+    state = state.copyWith(messages: list);
+  }
+
+  int _sortedInsertIndex(List<Message> list, Message message) {
+    var low = 0;
+    var high = list.length;
+    while (low < high) {
+      final mid = (low + high) >> 1;
+      if (list[mid].createdAt.isBefore(message.createdAt)) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
+  }
+
+  @override
+  void dispose() {
+    final channel = _channel;
+    if (channel != null) {
+      SupabaseConfig.client.removeChannel(channel);
+    }
+    super.dispose();
+  }
+}
+
+/// Phase D — one controller/channel per open conversation, `autoDispose`d
+/// (closing its Realtime channel with it, via
+/// `ChatMessagesController.dispose`) the moment `ChatDetailScreen`
+/// unmounts, so leaving a chat doesn't leave a subscription running in
+/// the background indefinitely.
+final chatMessagesControllerProvider = StateNotifierProvider.autoDispose
+    .family<ChatMessagesController, ChatMessagesState, String>(
+        (ref, conversationId) {
+  return ChatMessagesController(
+    ref.watch(messageRepositoryProvider),
+    conversationId,
+  );
 });
 
 final messageStatusesStreamProvider =
@@ -332,7 +519,7 @@ class SendMediaMessageController extends AsyncNotifier<void> {
   /// Gemini's native audio input, then runs a second text pass over
   /// the transcript to pull out action items/reminders — both results
   /// written back onto the same `messages` row so the realtime stream
-  /// (already open on this conversation, per `messagesStreamProvider`)
+  /// (already open on this conversation, per `chatMessagesControllerProvider`)
   /// carries them to both sides the moment they're ready. Unlike
   /// translation, this isn't scoped to direct chats —
   /// `voice_transcript`/`voice_actions` are per-message columns, not

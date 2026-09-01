@@ -4,35 +4,13 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/errors/failure.dart';
 import '../../../models/message.dart';
 import '../../../models/message_status.dart';
+import 'message_event.dart';
 
 /// All `messages`/`message_status` reads and writes go through here
 /// (rules.md Rule 8 pattern extended to the chat domain).
 class MessageRepository {
   MessageRepository(this._client);
   final SupabaseClient _client;
-
-  /// Realtime message stream for one conversation, oldest first.
-  /// Uses a single `.eq()` filter deliberately — supabase_flutter's
-  /// `.stream()` is documented to misbehave with more than one chained
-  /// filter, so conversation scoping is the only server-side filter and
-  /// ordering/mapping happens after.
-  ///
-  /// `ascending: true` is NOT optional here despite reading like the
-  /// obvious default — postgrest-dart's `order()` defaults to
-  /// `ascending: false` (descending) when unspecified. Omitting it was
-  /// the actual root cause of a message-ordering bug: this call was
-  /// silently returning newest-first, which `ChatDetailScreen`'s
-  /// `.reversed` + `ListView.builder(reverse: true)` (itself correct)
-  /// then inverted a second time, putting the newest message at the
-  /// top of the chat instead of the bottom.
-  Stream<List<Message>> watchMessages(String conversationId) {
-    return _client
-        .from('messages')
-        .stream(primaryKey: ['id'])
-        .eq('conversation_id', conversationId)
-        .order('created_at', ascending: true)
-        .map((rows) => rows.map(Message.fromJson).toList());
-  }
 
   /// Every `message_status` row visible to the current user under RLS:
   /// their own rows as a recipient, plus (per the added
@@ -47,12 +25,12 @@ class MessageRepository {
   }
 
   /// Batch 8 — one-shot fetch of the most recent messages in a
-  /// conversation, oldest first, for `AiAgentController` to build a
-  /// context transcript from (PRD.md §10: "context of recent chat
-  /// history... not just the single message it's mentioned in").
-  /// Deliberately a plain `Future` fetch, not the `.stream()` used by
-  /// [watchMessages] — the agent needs one snapshot to reason over, not
-  /// a live subscription.
+  /// conversation, oldest first. Originally written for
+  /// `AiAgentController`'s context transcript (PRD.md §10: "context of
+  /// recent chat history... not just the single message it's mentioned
+  /// in"); Phase D also reuses this unchanged as `ChatMessagesController`'s
+  /// *initial page* fetch — same "most recent N, oldest-first" shape,
+  /// just a different caller and a larger default `limit`.
   Future<List<Message>> fetchRecentMessages({
     required String conversationId,
     int limit = 20,
@@ -72,6 +50,101 @@ class MessageRepository {
     } on PostgrestException catch (e) {
       throw SupabaseFailure(e.message);
     }
+  }
+
+  /// Phase D (WISP_PERFORMANCE_HANDOFF.md §11) — the *next* page of
+  /// history, strictly older than [before]. Same "desc query, then
+  /// reverse to oldest-first" shape as [fetchRecentMessages], just with
+  /// a `created_at` cursor so `ChatMessagesController.loadOlder()` can
+  /// keep walking backward through a conversation's history one bounded
+  /// page at a time instead of ever re-fetching everything already
+  /// loaded.
+  Future<List<Message>> fetchOlderMessages({
+    required String conversationId,
+    required DateTime before,
+    int limit = 30,
+  }) async {
+    try {
+      final rows = await _client
+          .from('messages')
+          .select()
+          .eq('conversation_id', conversationId)
+          .lt('created_at', before.toIso8601String())
+          .order('created_at', ascending: false)
+          .limit(limit);
+      return (rows as List)
+          .map((r) => Message.fromJson(r as Map<String, dynamic>))
+          .toList()
+          .reversed
+          .toList();
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Phase D — replaces the old `watchMessages()` full-snapshot
+  /// `.stream()` (which re-fetched and re-emitted the *entire*
+  /// conversation's message list on every single insert/update, an
+  /// amount of work that grows without bound as a conversation ages —
+  /// WISP_PERFORMANCE_HANDOFF.md §11's core complaint) with a
+  /// conversation-scoped Realtime channel that only ever pushes the one
+  /// row that actually changed. `ChatMessagesController` is the only
+  /// intended caller: it merges each [MessageEvent] into its own
+  /// bounded, paginated local collection rather than trusting the
+  /// backend to keep handing back a full list.
+  ///
+  /// Filtered server-side to [conversationId] via `PostgresChangeFilter`
+  /// so this device only receives wire traffic for the conversation
+  /// it's actually looking at — RLS (`messages_select_member`) still
+  /// applies underneath regardless; this filter is purely to avoid
+  /// paying for every other conversation's events too.
+  ///
+  /// Returns the raw [RealtimeChannel] so the caller owns its lifecycle
+  /// (`SupabaseConfig.client.removeChannel(...)` on dispose) — this
+  /// repository doesn't track open channels itself, same "caller owns
+  /// what it opens" shape as `LocationRepository`'s live-tracking
+  /// stream subscriptions.
+  RealtimeChannel watchConversationEvents({
+    required String conversationId,
+    required void Function(MessageEvent event) onEvent,
+  }) {
+    final filter = PostgresChangeFilter(
+      type: PostgresChangeFilterType.eq,
+      column: 'conversation_id',
+      value: conversationId,
+    );
+    final channel = _client.channel('messages-$conversationId');
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          filter: filter,
+          callback: (payload) => onEvent(
+            MessageEvent.insert(Message.fromJson(payload.newRecord)),
+          ),
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'messages',
+          filter: filter,
+          callback: (payload) => onEvent(
+            MessageEvent.update(Message.fromJson(payload.newRecord)),
+          ),
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'messages',
+          filter: filter,
+          callback: (payload) {
+            final oldId = payload.oldRecord['id'] as String?;
+            if (oldId != null) onEvent(MessageEvent.delete(oldId));
+          },
+        )
+        .subscribe();
+    return channel;
   }
 
   /// Batch 8 — inserts the embedded AI agent's reply as its own

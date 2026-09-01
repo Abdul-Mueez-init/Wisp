@@ -54,10 +54,31 @@ class ChatDetailScreen extends ConsumerStatefulWidget {
 }
 
 class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
+  // Perf fix (WISP_PERFORMANCE_HANDOFF.md §6) — tracks the newest
+  // message id we've already run a read-receipt sync for, so a
+  // `messages` stream emission that doesn't actually add a new
+  // incoming message (e.g. a translation or voice-transcript UPDATE
+  // on an existing row, or this user's own outgoing message) doesn't
+  // re-run markDelivered/markRead's several queries for nothing.
+  // Semantics are unchanged — every genuinely new message still gets
+  // synced, exactly as before.
+  String? _lastSyncedMessageId;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncReadReceipts());
+  }
+
+  /// Only re-runs the sync if the newest message in the conversation
+  /// is one we haven't already synced. [watchMessages] orders
+  /// ascending by `created_at`, so `messages.last` is the newest.
+  void _maybeSyncReadReceipts(List<Message> messages) {
+    if (messages.isEmpty) return;
+    final newestId = messages.last.id;
+    if (newestId == _lastSyncedMessageId) return;
+    _lastSyncedMessageId = newestId;
+    _syncReadReceipts();
   }
 
   Future<void> _syncReadReceipts() async {
@@ -86,7 +107,6 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final myId = ref.watch(currentSessionProvider)?.user.id;
     final messagesAsync =
         ref.watch(messagesStreamProvider(widget.conversationId));
-    final statusesAsync = ref.watch(messageStatusesStreamProvider);
     final sending = ref.watch(sendMessageControllerProvider).isLoading;
     final liveLocationState = ref.watch(liveLocationControllerProvider);
     final sharingLiveHere = liveLocationState.isActive &&
@@ -121,17 +141,24 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     };
 
     ref.listen(messagesStreamProvider(widget.conversationId), (prev, next) {
-      if (next.hasValue) _syncReadReceipts();
+      final messages = next.value;
+      if (messages != null) _maybeSyncReadReceipts(messages);
     });
 
     // Phase 4 — presence (direct chats only; groups have no single
     // "other user" to show a dot for) and typing, for both chat types.
-    final livePresence = (!isGroup && displayProfile != null)
-        ? ref.watch(watchProfileProvider(displayProfile.id))
+    // Perf fix (WISP_PERFORMANCE_HANDOFF.md §10) — reads from the
+    // centralized `presenceByIdProvider` map (one app-wide realtime
+    // source) instead of opening a dedicated per-user stream for this
+    // screen. Same fallback behavior as before: until presence data
+    // is available for this user, falls back to the static
+    // `displayProfile` passed in via navigation.
+    final centralPresence = (!isGroup && displayProfile != null)
+        ? ref.watch(presenceByIdProvider.select((m) => m[displayProfile.id]))
         : null;
-    final isOnline = livePresence?.value?.isOnline ?? displayProfile?.isOnline;
+    final isOnline = centralPresence?.isOnline ?? displayProfile?.isOnline;
     final lastSeenAt =
-        livePresence?.value?.lastSeenAt ?? displayProfile?.lastSeenAt;
+        centralPresence?.lastSeenAt ?? displayProfile?.lastSeenAt;
 
     final typingUserIds =
         ref.watch(typingUsersStreamProvider(widget.conversationId)).value ??
@@ -278,7 +305,6 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                   );
                 }
                 final reversed = messages.reversed.toList();
-                final statuses = statusesAsync.value ?? const [];
 
                 return ListView.builder(
                   reverse: true,
@@ -290,12 +316,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                   itemBuilder: (context, index) {
                     final Message message = reversed[index];
                     final isMine = message.senderId == myId;
-                    String? status;
-                    if (isMine) {
-                      final match =
-                          statuses.where((s) => s.messageId == message.id);
-                      if (match.isNotEmpty) status = match.first.status;
-                    }
+                    // Status is no longer looked up here — MessageBubble's
+                    // leaf `_StatusTick` resolves it itself via the
+                    // indexed `messageStatusByIdProvider`, so a status
+                    // update no longer has to rebuild this whole list.
                     final senderLabel =
                         (isGroup && !isMine && message.senderId != null)
                             ? senderNames[message.senderId]
@@ -304,7 +328,6 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                       key: ValueKey(message.id),
                       message: message,
                       isMine: isMine,
-                      status: status,
                       senderLabel: senderLabel,
                     );
                   },

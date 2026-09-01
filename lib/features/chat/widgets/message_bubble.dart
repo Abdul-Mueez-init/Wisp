@@ -28,13 +28,11 @@ class MessageBubble extends StatelessWidget {
     super.key,
     required this.message,
     required this.isMine,
-    this.status,
     this.senderLabel,
   });
 
   final Message message;
   final bool isMine;
-  final String? status; // 'sent' | 'delivered' | 'read' — mine only
   final String? senderLabel;
 
   static const _clippedTypes = {
@@ -128,13 +126,7 @@ class MessageBubble extends StatelessWidget {
                 ),
                 if (isMine) ...[
                   const SizedBox(width: 4),
-                  Icon(
-                    _statusIcon(status),
-                    size: 14,
-                    color: status == 'read'
-                        ? AppColors.primary
-                        : AppColors.outline,
-                  ),
+                  _StatusTick(messageId: message.id),
                 ],
               ],
             ),
@@ -224,16 +216,6 @@ class MessageBubble extends StatelessWidget {
 
   (IconData, String) _placeholderFor(String type) {
     return (Icons.help_outline, 'Unsupported message');
-  }
-
-  IconData _statusIcon(String? status) {
-    switch (status) {
-      case 'read':
-      case 'delivered':
-        return Icons.done_all_rounded;
-      default:
-        return Icons.done_rounded;
-    }
   }
 
   String _formatTime(DateTime dt) {
@@ -411,6 +393,40 @@ class _VideoBubbleContent extends ConsumerWidget {
           ),
       ],
     );
+  }
+}
+
+/// Perf fix (WISP_PERFORMANCE_HANDOFF.md §4/§5) — the only part of a
+/// sent bubble that changes after the message lands is its delivery/
+/// read tick. Isolating it here with `.select` means a status update
+/// rebuilds just this small icon, not the bubble, the message list, or
+/// the screen. Same 'sent'/'delivered'/'read' → icon/color mapping as
+/// before, just resolved locally instead of via a passed-in parameter.
+class _StatusTick extends ConsumerWidget {
+  const _StatusTick({required this.messageId});
+
+  final String messageId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(
+      messageStatusByIdProvider.select((map) => map[messageId]?.status),
+    );
+    return Icon(
+      _statusIcon(status),
+      size: 14,
+      color: status == 'read' ? AppColors.primary : AppColors.outline,
+    );
+  }
+
+  IconData _statusIcon(String? status) {
+    switch (status) {
+      case 'read':
+      case 'delivered':
+        return Icons.done_all_rounded;
+      default:
+        return Icons.done_rounded;
+    }
   }
 }
 

@@ -41,16 +41,22 @@ class ProfileRepository {
     }
   }
 
-  /// Realtime stream of a single profile row — used by Phase 4
-  /// presence/last-seen UI to show another user's online status live,
-  /// the same "StreamProvider watching a Supabase Realtime stream"
-  /// pattern used elsewhere (architecture.md).
-  Stream<Profile?> watchProfile(String userId) {
-    return _client
-        .from('profiles')
-        .stream(primaryKey: ['id'])
-        .eq('id', userId)
-        .map((rows) => rows.isEmpty ? null : Profile.fromJson(rows.first));
+  /// Perf fix (WISP_PERFORMANCE_HANDOFF.md §10) — ONE realtime
+  /// subscription covering every profile, instead of a separate
+  /// `.eq('id', userId)` stream per user being displayed (which used
+  /// to scale linearly with the number of direct chats shown at once —
+  /// one open chat's app bar, plus one per direct row in the chat
+  /// list). `presence_provider.dart`'s `presenceByIdProvider` turns
+  /// this into a `Map<String, Profile>` that callers do a cheap local
+  /// lookup against, via `.select`, so a single user's presence change
+  /// only rebuilds the specific row/widget showing that user — not
+  /// every row, and not by opening a new subscription per row.
+  /// `profiles_select_all` RLS already makes every row readable by any
+  /// authenticated user, so this doesn't expose anything a per-user
+  /// stream didn't already expose one row at a time.
+  Stream<List<Profile>> watchAllProfiles() {
+    return _client.from('profiles').stream(
+        primaryKey: ['id']).map((rows) => rows.map(Profile.fromJson).toList());
   }
 
   /// Flips this user's `is_online` flag. `last_seen_at` is only stamped

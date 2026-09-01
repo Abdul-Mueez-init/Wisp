@@ -88,36 +88,68 @@ class ChatListScreen extends ConsumerWidget {
       ),
       body: RefreshIndicator(
         onRefresh: () => ref.refresh(myConversationSummariesProvider.future),
-        child: ListView(
-          children: [
-            _AiChatTile(
-              summary: aiSummary,
-              onTap: () => _openAiChat(context, ref),
+        child: CustomScrollView(
+          // Perf fix (WISP_PERFORMANCE_HANDOFF.md §7) — a single lazy
+          // scroll hierarchy instead of a parent `ListView` containing
+          // a nested `ListView.separated(shrinkWrap: true,
+          // physics: NeverScrollableScrollPhysics())`. The nested list
+          // used to force full-height layout of every row up front
+          // (that's what `shrinkWrap` requires) instead of laying out
+          // lazily as rows scroll into view. Same visible order (AI
+          // tile → divider → conversation rows), same pull-to-refresh,
+          // same navigation, same states — only the scrolling
+          // container changed.
+          physics: const AlwaysScrollableScrollPhysics(
+            parent: BouncingScrollPhysics(),
+          ),
+          slivers: [
+            SliverToBoxAdapter(
+              child: _AiChatTile(
+                summary: aiSummary,
+                onTap: () => _openAiChat(context, ref),
+              ),
             ),
-            Divider(
-              height: 1,
-              indent: 84,
-              color: AppColors.outlineVariant.withValues(alpha: 0.1),
+            SliverToBoxAdapter(
+              child: Divider(
+                height: 1,
+                indent: 84,
+                color: AppColors.outlineVariant.withValues(alpha: 0.1),
+              ),
             ),
             summariesAsync.when(
-              loading: () => const Padding(
-                padding: EdgeInsets.symmetric(vertical: 32),
-                child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+              loading: () => const SliverToBoxAdapter(
+                child: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 32),
+                  child:
+                      Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
               ),
-              error: (e, _) => _ErrorState(message: '$e'),
+              error: (e, _) =>
+                  SliverToBoxAdapter(child: _ErrorState(message: '$e')),
               data: (_) {
-                if (otherSummaries.isEmpty) return const _EmptyState();
-                return ListView.separated(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: otherSummaries.length,
-                  separatorBuilder: (_, __) => Divider(
-                    height: 1,
-                    indent: 84,
-                    color: AppColors.outlineVariant.withValues(alpha: 0.1),
+                if (otherSummaries.isEmpty) {
+                  return const SliverToBoxAdapter(child: _EmptyState());
+                }
+                // Sliver equivalent of `ListView.separated`: Flutter
+                // has no stock `SliverList.separated`, so odd indices
+                // render the divider and even indices render a row —
+                // same visible result, still built lazily one item at
+                // a time as it scrolls into view.
+                return SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, i) {
+                      if (i.isOdd) {
+                        return Divider(
+                          height: 1,
+                          indent: 84,
+                          color:
+                              AppColors.outlineVariant.withValues(alpha: 0.1),
+                        );
+                      }
+                      return _ChatListTile(summary: otherSummaries[i ~/ 2]);
+                    },
+                    childCount: otherSummaries.length * 2 - 1,
                   ),
-                  itemBuilder: (context, i) =>
-                      _ChatListTile(summary: otherSummaries[i]),
                 );
               },
             ),
@@ -217,12 +249,19 @@ class _ChatListTile extends ConsumerWidget {
         ? ref.read(profileRepositoryProvider).resolveAvatarUrl(rawAvatarPath)
         : null;
 
-    final isOnline = summary.conversation.isDirect &&
-            summary.otherProfile != null
-        ? ref
-            .watch(watchProfileProvider(summary.otherProfile!.id))
-            .maybeWhen(data: (p) => p?.isOnline ?? false, orElse: () => false)
-        : false;
+    // Perf fix (WISP_PERFORMANCE_HANDOFF.md §10) — this used to open a
+    // dedicated realtime subscription per row via
+    // `watchProfileProvider(userId)`, scaling linearly with the number
+    // of direct chats shown. Now reads from the single app-wide
+    // `presenceByIdProvider` map, selecting just this user's
+    // `isOnline` value — this row only rebuilds when *this specific
+    // user's* online status actually changes, not on every presence
+    // tick for anyone else in the map.
+    final isOnline =
+        summary.conversation.isDirect && summary.otherProfile != null
+            ? ref.watch(presenceByIdProvider
+                .select((m) => m[summary.otherProfile!.id]?.isOnline ?? false))
+            : false;
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(

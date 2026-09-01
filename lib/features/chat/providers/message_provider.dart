@@ -37,6 +37,18 @@ final messageStatusesStreamProvider =
   return ref.watch(messageRepositoryProvider).watchMyVisibleStatuses();
 });
 
+/// Perf fix (WISP_PERFORMANCE_HANDOFF.md §5) — indexes the raw status
+/// list by `messageId` once per stream emission, instead of every
+/// message bubble scanning the full list with `.where()` on every
+/// build. `MessageBubble`'s status-tick widget watches this via
+/// `.select` so a status change only rebuilds the one bubble it
+/// belongs to, not the whole message list or screen. Same values,
+/// same semantics as before — just an O(1) lookup instead of O(n).
+final messageStatusByIdProvider = Provider<Map<String, MessageStatus>>((ref) {
+  final statuses = ref.watch(messageStatusesStreamProvider).value ?? const [];
+  return {for (final s in statuses) s.messageId: s};
+});
+
 final otherDirectMemberProvider =
     FutureProvider.family<Profile?, String>((ref, conversationId) async {
   final myId = ref.watch(currentSessionProvider)?.user.id;

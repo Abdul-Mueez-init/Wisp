@@ -10,14 +10,24 @@ final presenceRepositoryProvider = Provider<PresenceRepository>((ref) {
   return PresenceRepository(SupabaseConfig.client);
 });
 
-/// Realtime online/offline + last-seen for a single user (per
-/// architecture.md, "Realtime data → StreamProvider"). Used to show a
-/// live status in a direct chat's app bar.
-final watchProfileProvider = StreamProvider.family<Profile?, String>(
-  (ref, userId) {
-    return ref.read(profileRepositoryProvider).watchProfile(userId);
-  },
-);
+/// Perf fix (WISP_PERFORMANCE_HANDOFF.md §10) — the single realtime
+/// source feeding presence app-wide, replacing what used to be one
+/// `watchProfileProvider(userId)` subscription per user shown on
+/// screen (one for the open chat's app bar, plus one per direct row
+/// in the chat list — scaling linearly with conversation count).
+final allProfilesStreamProvider = StreamProvider<List<Profile>>((ref) {
+  return ref.read(profileRepositoryProvider).watchAllProfiles();
+});
+
+/// Indexed once per emission, same pattern as `messageStatusByIdProvider`
+/// (Phase A). Callers use `.select` against this map (e.g.
+/// `presenceByIdProvider.select((m) => m[userId]?.isOnline)`) so a
+/// presence change for one user only rebuilds the specific row/widget
+/// showing that user, not every row and not the whole screen.
+final presenceByIdProvider = Provider<Map<String, Profile>>((ref) {
+  final profiles = ref.watch(allProfilesStreamProvider).value ?? const [];
+  return {for (final p in profiles) p.id: p};
+});
 
 /// Drives *this device's* own online/offline presence: joins the shared
 /// presence channel and writes the corresponding `profiles.is_online`

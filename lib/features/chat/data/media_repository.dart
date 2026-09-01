@@ -1,6 +1,7 @@
 // lib/features/chat/data/media_repository.dart
 import 'dart:typed_data';
 
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -106,6 +107,33 @@ class MediaRepository {
       );
     } on StorageException catch (e) {
       throw SupabaseFailure(e.message);
+    }
+  }
+
+  /// Phase 2 (wisp_fixes_handoff.md item 1) — re-encodes an image to
+  /// WebP before it's handed to [uploadBytes]. Runs *before*
+  /// `SendMediaMessageController`'s [maxImageBytes] check, so the 8MB
+  /// cap from architecture.md's "Storage Buckets" section applies to
+  /// the re-encoded file that actually lands in Storage, not
+  /// necessarily the original picked/captured file. Quality 82 is a
+  /// reasonable default for chat-bubble/story-preview viewing sizes —
+  /// visually close to lossless at a fraction of typical camera JPEG
+  /// size. Best-effort: if compression fails for any reason (an
+  /// unsupported source format, a platform codec issue, etc.), the
+  /// original bytes are uploaded as-is rather than blocking the send
+  /// over an optimization step — same "never block core functionality
+  /// on a nice-to-have" shape the app already uses for translation and
+  /// voice transcription.
+  Future<Uint8List> reencodeImageToWebp(Uint8List original) async {
+    try {
+      final compressed = await FlutterImageCompress.compressWithList(
+        original,
+        format: CompressFormat.webp,
+        quality: 82,
+      );
+      return compressed.isEmpty ? original : compressed;
+    } catch (_) {
+      return original;
     }
   }
 

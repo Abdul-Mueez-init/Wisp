@@ -13,6 +13,19 @@ import '../theme/app_theme.dart';
 /// tabs are now real screens (Batch 10c closes out Calls, the last
 /// remaining stub — previously "coming later" per rules.md Rule 2).
 /// Replaces the old bootstrap screen as the `/` route.
+///
+/// Phase 2 fix (wisp_fixes_handoff.md, Finding B): `_tabs` used to be a
+/// `static const` list, so all four tab screens — including
+/// `CallsTabScreen`, which opens a Realtime `.stream()` subscription the
+/// moment it's built — were constructed eagerly at launch, before the
+/// Realtime socket had necessarily finished its own auth handshake even
+/// though `currentSessionProvider` already had a cached session
+/// synchronously. That race, not an RLS problem, is what produced the
+/// "Could not load call history" flash on cold launch. Fix: each
+/// non-landing tab is now only ever constructed the first time it's
+/// actually selected. `IndexedStack` still keeps every *built* tab's
+/// state alive when switching away from it — only the up-front eager
+/// construction of tabs the user hasn't opened yet is gone.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -23,20 +36,38 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
 
-  static const _tabs = [
+  // Which tabs have been built at least once. Chats (index 0) is the
+  // landing tab, so it's built immediately same as before; Status,
+  // Calls, and Settings are built lazily on first selection.
+  final Set<int> _builtIndexes = {0};
+
+  static const _screens = [
     ChatListScreen(),
     StatusListScreen(),
     CallsTabScreen(),
     ProfileSettingsScreen(),
   ];
 
+  void _onDestinationSelected(int i) {
+    setState(() {
+      _index = i;
+      _builtIndexes.add(i);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(index: _index, children: _tabs),
+      body: IndexedStack(
+        index: _index,
+        children: [
+          for (var i = 0; i < _screens.length; i++)
+            _builtIndexes.contains(i) ? _screens[i] : const SizedBox.shrink(),
+        ],
+      ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
-        onDestinationSelected: (i) => setState(() => _index = i),
+        onDestinationSelected: _onDestinationSelected,
         backgroundColor: AppColors.surfaceContainerLow,
         indicatorColor: AppColors.primaryContainer,
         destinations: const [

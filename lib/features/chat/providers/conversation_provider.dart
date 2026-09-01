@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../config/supabase_config.dart';
 import '../../../core/errors/failure.dart';
@@ -82,23 +85,96 @@ final conversationByIdProvider =
       .getConversation(conversationId);
 });
 
-/// Chat list data source (Batch 6b). FutureProvider, not
-/// StreamProvider — same join reasoning as `activeStoryGroupsProvider`
-/// (PostgREST embedding can't cleanly express "conversations + last
-/// message" as a single realtime-streamable query). Invalidated via
-/// pull-to-refresh on the chat list screen.
+/// Chat list data source (Batch 6b, made realtime in Phase 2 per
+/// wisp_fixes_handoff.md).
 ///
-/// Known limitation, flagged rather than silently accepted: this list
-/// does NOT auto-reorder the instant a new message arrives elsewhere in
-/// the app — only on refresh/re-navigation. A realtime-perfect version
-/// would need a `.stream()`-based provider per conversation feeding a
-/// combined view, which is meaningfully more plumbing; deferred rather
-/// than built silently, matching Rule 1.
+/// PostgREST embedding still can't cleanly express "conversations +
+/// last message" as a single realtime-streamable query (same reasoning
+/// `activeStoryGroupsProvider` uses), so this isn't a direct
+/// `.stream()` wrapper around one table. Instead it re-runs
+/// [ConversationRepository.fetchMyConversationSummaries] (now
+/// parallelized, Finding D) whenever something relevant changes, via
+/// two Realtime channels:
+///  - `messages` inserts/updates, unfiltered — a new message anywhere,
+///    or an update (e.g. Phase 7 translation landing) that could change
+///    a preview.
+///  - `conversation_members` inserts, unfiltered — a brand-new
+///    conversation (direct or group) this user was just added to,
+///    which wouldn't have a `messages` row yet to trigger the first
+///    channel.
+/// Both are subscribed without a server-side filter because Realtime's
+/// `PostgresChangeFilter` only supports a single `eq`, and what's
+/// needed here is "any row this user's own RLS SELECT policy would let
+/// them see" — which is exactly what Postgres Changes already enforces
+/// per-subscriber given `messages_select_member` /
+/// `members_select_own_conversations` (verified live, Phase 1). A
+/// change this user isn't allowed to see never reaches this channel in
+/// the first place.
+/// Rapid-fire changes (e.g. several `message_status` reads landing at
+/// once) are coalesced with a short debounce so this doesn't refetch
+/// once per event.
+///
+/// This also closes the previously-flagged "chat list doesn't
+/// auto-reorder on a new message elsewhere in the app" limitation —
+/// any qualifying event now triggers a fresh, correctly-sorted fetch.
 final myConversationSummariesProvider =
-    FutureProvider<List<ConversationSummary>>((ref) async {
+    StreamProvider.autoDispose<List<ConversationSummary>>((ref) {
   final myId = ref.watch(currentSessionProvider)?.user.id;
-  if (myId == null) return const [];
-  return ref
-      .read(conversationRepositoryProvider)
-      .fetchMyConversationSummaries(myId);
+  if (myId == null) return Stream.value(const []);
+
+  final repo = ref.watch(conversationRepositoryProvider);
+  final controller = StreamController<List<ConversationSummary>>();
+  Timer? debounce;
+
+  Future<void> refresh() async {
+    try {
+      final summaries = await repo.fetchMyConversationSummaries(myId);
+      if (!controller.isClosed) controller.add(summaries);
+    } catch (e, st) {
+      if (!controller.isClosed) controller.addError(e, st);
+    }
+  }
+
+  void scheduleRefresh() {
+    debounce?.cancel();
+    debounce = Timer(const Duration(milliseconds: 300), refresh);
+  }
+
+  // Initial load — fires immediately, not debounced.
+  unawaited(refresh());
+
+  final messagesChannel = SupabaseConfig.client
+      .channel('chat-list-messages-$myId')
+      .onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'messages',
+        callback: (_) => scheduleRefresh(),
+      )
+      .onPostgresChanges(
+        event: PostgresChangeEvent.update,
+        schema: 'public',
+        table: 'messages',
+        callback: (_) => scheduleRefresh(),
+      )
+      .subscribe();
+
+  final membersChannel = SupabaseConfig.client
+      .channel('chat-list-members-$myId')
+      .onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'conversation_members',
+        callback: (_) => scheduleRefresh(),
+      )
+      .subscribe();
+
+  ref.onDispose(() {
+    debounce?.cancel();
+    SupabaseConfig.client.removeChannel(messagesChannel);
+    SupabaseConfig.client.removeChannel(membersChannel);
+    controller.close();
+  });
+
+  return controller.stream;
 });

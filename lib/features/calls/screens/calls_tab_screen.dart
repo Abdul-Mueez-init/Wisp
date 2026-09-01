@@ -23,11 +23,31 @@ import '../providers/call_provider.dart';
 /// the other member of the call's (always-direct, PRD.md §11) 1-on-1
 /// conversation — via [otherDirectMemberProvider] — regardless of
 /// which side placed the call.
-class CallsTabScreen extends ConsumerWidget {
+/// Phase 2 fix (wisp_fixes_handoff.md, Finding B): `myVisibleCallsStreamProvider`
+/// can legitimately emit one error event right after cold launch, while the
+/// Realtime socket is still finishing its auth handshake — the underlying
+/// stream keeps running and recovers on its own once auth completes (this
+/// was never an RLS problem). The screen used to render that transient error
+/// verbatim on first paint. Now a `ConsumerStatefulWidget` so it can track
+/// "how long has this screen been mounted" and treat any error within the
+/// first [_errorGracePeriod] as still-loading, scheduling one rebuild for
+/// when the grace period elapses in case the error is still live by then. A
+/// real, persistent failure (offline, actual backend issue, etc.) still
+/// surfaces normally once that window passes.
+class CallsTabScreen extends ConsumerStatefulWidget {
   const CallsTabScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CallsTabScreen> createState() => _CallsTabScreenState();
+}
+
+class _CallsTabScreenState extends ConsumerState<CallsTabScreen> {
+  final DateTime _mountedAt = DateTime.now();
+  static const _errorGracePeriod = Duration(seconds: 2);
+  bool _graceTimerScheduled = false;
+
+  @override
+  Widget build(BuildContext context) {
     final callsAsync = ref.watch(myVisibleCallsStreamProvider);
     final myId = ref.watch(currentSessionProvider)?.user.id;
 
@@ -36,16 +56,30 @@ class CallsTabScreen extends ConsumerWidget {
       body: callsAsync.when(
         loading: () =>
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-        error: (e, _) => Center(
-          child: Padding(
-            padding: const EdgeInsets.all(AppSpacing.pageMargin),
-            child: Text(
-              'Could not load call history.\n$e',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodyMedium,
+        error: (e, _) {
+          final elapsed = DateTime.now().difference(_mountedAt);
+          if (elapsed < _errorGracePeriod) {
+            if (!_graceTimerScheduled) {
+              _graceTimerScheduled = true;
+              Future.delayed(_errorGracePeriod - elapsed, () {
+                if (mounted) setState(() {});
+              });
+            }
+            return const Center(
+              child: CircularProgressIndicator(strokeWidth: 2),
+            );
+          }
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(AppSpacing.pageMargin),
+              child: Text(
+                'Could not load call history.\n$e',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
             ),
-          ),
-        ),
+          );
+        },
         data: (calls) {
           if (myId == null) return const SizedBox.shrink();
           final sorted = [...calls]..sort((a, b) {

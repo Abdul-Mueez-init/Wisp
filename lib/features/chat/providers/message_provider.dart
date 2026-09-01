@@ -398,11 +398,19 @@ class SendMediaMessageController extends AsyncNotifier<void> {
     required Uint8List bytes,
     required String fileExt,
     String? caption,
-  }) {
+  }) async {
+    // Phase 2 (wisp_fixes_handoff.md item 1) — re-encode to WebP before
+    // the upload-cap check below, so [MediaRepository.maxImageBytes]
+    // applies to what actually reaches Storage. Falls back to the
+    // original bytes on any compression failure (see
+    // MediaRepository.reencodeImageToWebp's doc comment), so this
+    // never blocks a send.
+    final webpBytes =
+        await ref.read(mediaRepositoryProvider).reencodeImageToWebp(bytes);
     return _sendMedia(
       conversationId: conversationId,
-      bytes: bytes,
-      fileName: 'photo.$fileExt',
+      bytes: webpBytes,
+      fileName: 'photo.webp',
       type: 'image',
       maxBytes: MediaRepository.maxImageBytes,
       maxBytesLabel: '8MB',

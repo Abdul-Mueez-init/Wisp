@@ -194,13 +194,18 @@ class ConversationRepository {
 
   /// Fetches every conversation [myId] is a member of, each paired
   /// with the other participant (direct chats) and its most recent
-  /// message (chat list preview, Batch 6b). N+1 queries — one extra
-  /// round trip per conversation for its last message — acceptable at
-  /// this app's demo scale, same reasoning `MediaRepository
-  /// .resolveFileInfo`'s extra `list()` call already uses. PostgREST
+  /// message (chat list preview, Batch 6b).
+  ///
+  /// Phase 2 fix (wisp_fixes_handoff.md, Finding D): this used to run
+  /// two sequential `await`ed queries per conversation inside a `for`
+  /// loop — one round trip at a time, so 10 chats meant 20+ serial
+  /// round trips end to end. Still N+1 in *query count* (PostgREST
   /// embedding doesn't cleanly support order+limit-1 on a nested
-  /// resource, so this stays a plain two-step fetch instead of a
-  /// fragile embedded query.
+  /// resource, so a single combined query isn't practical here), but
+  /// every conversation's pair of queries — and every conversation's
+  /// pair relative to every other conversation's — now fires
+  /// concurrently via [Future.wait], so wall-clock time is roughly one
+  /// round trip's worth regardless of chat count, not one per chat.
   Future<List<ConversationSummary>> fetchMyConversationSummaries(
     String myId,
   ) async {
@@ -215,31 +220,9 @@ class ConversationRepository {
               Conversation.fromJson(r['conversations'] as Map<String, dynamic>))
           .toList();
 
-      final summaries = <ConversationSummary>[];
-      for (final conversation in conversations) {
-        Profile? otherProfile;
-        if (conversation.isDirect) {
-          otherProfile = await getOtherDirectMember(
-            conversationId: conversation.id,
-            myId: myId,
-          );
-        }
-
-        final lastMessageRow = await _client
-            .from('messages')
-            .select()
-            .eq('conversation_id', conversation.id)
-            .order('created_at', ascending: false)
-            .limit(1)
-            .maybeSingle();
-
-        summaries.add(ConversationSummary(
-          conversation: conversation,
-          otherProfile: otherProfile,
-          lastMessage:
-              lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
-        ));
-      }
+      final summaries = await Future.wait(conversations.map(
+        (conversation) => _fetchSummary(conversation: conversation, myId: myId),
+      ));
 
       // Most recently active conversation first — falls back to
       // `conversations.created_at` for a chat with no messages yet.
@@ -253,5 +236,37 @@ class ConversationRepository {
     } on PostgrestException catch (e) {
       throw SupabaseFailure(e.message);
     }
+  }
+
+  /// One conversation's pair of lookups (other member + last message),
+  /// run concurrently with each other via [Future.wait] — the unit of
+  /// work [fetchMyConversationSummaries] then fans out across all of a
+  /// user's conversations at once.
+  Future<ConversationSummary> _fetchSummary({
+    required Conversation conversation,
+    required String myId,
+  }) async {
+    final results = await Future.wait<dynamic>([
+      conversation.isDirect
+          ? getOtherDirectMember(conversationId: conversation.id, myId: myId)
+          : Future<Profile?>.value(null),
+      _client
+          .from('messages')
+          .select()
+          .eq('conversation_id', conversation.id)
+          .order('created_at', ascending: false)
+          .limit(1)
+          .maybeSingle(),
+    ]);
+
+    final otherProfile = results[0] as Profile?;
+    final lastMessageRow = results[1] as Map<String, dynamic>?;
+
+    return ConversationSummary(
+      conversation: conversation,
+      otherProfile: otherProfile,
+      lastMessage:
+          lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
+    );
   }
 }

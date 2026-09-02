@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' show Session;
 
 import 'app_shell.dart';
 import '../../features/auth/providers/auth_provider.dart';
@@ -16,18 +18,45 @@ import '../../features/stories/screens/story_viewer_screen.dart';
 import '../../models/conversation.dart';
 import '../../models/profile.dart';
 
-/// Router as a Riverpod provider so it can watch auth/profile state and
-/// redirect accordingly.
+/// BUGFIX (Home tab going blank + "Another exception was thrown" on
+/// interaction): this used to be a plain `Provider<GoRouter>` that
+/// called `ref.watch(currentSessionProvider)` /
+/// `ref.watch(currentProfileProvider)` directly inside the provider
+/// body. That meant *any* emission from either — not just a real
+/// login/logout, but also a Supabase `TOKEN_REFRESHED` event (which
+/// `_PresenceLifecycle` in main.dart deliberately triggers on every
+/// app resume via `refreshSessionIfNeeded()`) — made Riverpod recompute
+/// the whole provider from scratch, handing `MaterialApp.router` a
+/// brand-new `GoRouter` instance. A new `GoRouter` means a new internal
+/// `Navigator`/`GlobalKey`, so the *entire* routed widget tree
+/// (AppShell, its bottom nav, the current screen) was being torn down
+/// and rebuilt out from under whatever was on screen — including
+/// mid-gesture, e.g. right after backgrounding/foregrounding the app.
+/// That's what produced a blank Home tab and a "null" exception the
+/// moment you touched the screen afterward.
+///
+/// Fix: build the `GoRouter` exactly ONCE per app lifetime. Auth/
+/// profile-driven redirects still work exactly as before, but now
+/// react via `refreshListenable` (which just asks GoRouter to re-run
+/// `redirect` in place) instead of the router object itself being
+/// thrown away and recreated.
 final routerProvider = Provider<GoRouter>((ref) {
-  final session = ref.watch(currentSessionProvider);
-  final isAuthenticated = session != null;
-  final profileAsync = isAuthenticated
-      ? ref.watch(currentProfileProvider)
-      : const AsyncValue<dynamic>.data(null);
+  final refreshListenable = _RouterRefreshListenable(ref);
+  ref.onDispose(refreshListenable.dispose);
 
   return GoRouter(
     initialLocation: '/',
+    refreshListenable: refreshListenable,
     redirect: (context, state) {
+      // `ref.read` (not `watch`) — this callback already re-runs on its
+      // own every time `refreshListenable` fires, so it doesn't need to
+      // (and shouldn't) also make the surrounding provider reactive.
+      final session = ref.read(currentSessionProvider);
+      final isAuthenticated = session != null;
+      final profileAsync = isAuthenticated
+          ? ref.read(currentProfileProvider)
+          : const AsyncValue<dynamic>.data(null);
+
       final loggingIn = state.matchedLocation == '/login';
       final onboarding = state.matchedLocation == '/onboarding';
 
@@ -127,3 +156,33 @@ final routerProvider = Provider<GoRouter>((ref) {
     ],
   );
 });
+
+/// Bridges Riverpod state into a plain `Listenable` GoRouter can watch
+/// via `refreshListenable`, so `redirect` re-runs whenever auth/profile
+/// state changes — without the `GoRouter` object (and its Navigator)
+/// ever being torn down and recreated. See the doc comment on
+/// `routerProvider` above for why that distinction matters.
+class _RouterRefreshListenable extends ChangeNotifier {
+  _RouterRefreshListenable(Ref ref) {
+    _subs = [
+      ref.listen<Session?>(
+        currentSessionProvider,
+        (_, __) => notifyListeners(),
+      ),
+      ref.listen<AsyncValue<Profile?>>(
+        currentProfileProvider,
+        (_, __) => notifyListeners(),
+      ),
+    ];
+  }
+
+  late final List<ProviderSubscription> _subs;
+
+  @override
+  void dispose() {
+    for (final sub in _subs) {
+      sub.close();
+    }
+    super.dispose();
+  }
+}

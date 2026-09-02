@@ -181,14 +181,32 @@ class _PillNavItem extends StatelessWidget {
               size: 22,
               color: selected ? AppColors.primary : AppColors.outline,
             ),
+            // BUGFIX (RenderFlex overflow at app_shell.dart:175): this
+            // Row sits inside `Expanded` (one quarter of the pill bar's
+            // width, per `_PillNavBar`), but `mainAxisSize: min` still
+            // laid the label `Text` out at its own natural/unconstrained
+            // width. On a narrow screen that quarter-width can be as
+            // little as ~50px, which "Settings"/"Status" at label-medium
+            // simply don't fit in alongside the icon — nothing was
+            // there to shrink it, so it overflowed by a fixed pixel
+            // amount regardless of device width. Wrapping the label in
+            // `Flexible` + `TextOverflow.ellipsis` lets it claim
+            // whatever width is actually left after the icon, and
+            // gracefully truncate instead of overflowing on anything
+            // narrower than that.
             if (selected) ...[
               const SizedBox(width: 6),
-              Text(
-                item.label,
-                style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                      color: AppColors.primary,
-                      fontWeight: FontWeight.w500,
-                    ),
+              Flexible(
+                child: Text(
+                  item.label,
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: AppColors.primary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
               ),
             ],
           ],

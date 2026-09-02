@@ -366,24 +366,38 @@ class _TrailingColumn extends StatelessWidget {
     if (timestamp == null && unreadCount <= 0) {
       return const SizedBox.shrink();
     }
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.end,
-      children: [
-        if (timestamp != null)
-          Text(
-            timestamp!,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: unreadCount > 0
-                      ? AppColors.primary
-                      : AppColors.onSurfaceVariant,
-                ),
-          ),
-        if (unreadCount > 0) ...[
-          const SizedBox(height: 6),
-          _UnreadBadge(count: unreadCount),
+    // BUGFIX ("Trailing widget consumes the entire tile width"): this
+    // Column had no width cap, so on a narrow screen a longer
+    // timestamp string (e.g. a full date instead of "2m") could grow
+    // wide enough to starve `ListTile` of the space it needs for
+    // `title`/`subtitle` — that's exactly what `ListTile` was flagging.
+    // Capping this at a fixed 64px, with the timestamp itself falling
+    // back to ellipsis if it's ever still too long for that budget,
+    // guarantees `ListTile` always has a predictable trailing width to
+    // lay out around, regardless of device width or timestamp format.
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 64),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          if (timestamp != null)
+            Text(
+              timestamp!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: unreadCount > 0
+                        ? AppColors.primary
+                        : AppColors.onSurfaceVariant,
+                  ),
+            ),
+          if (unreadCount > 0) ...[
+            const SizedBox(height: 6),
+            _UnreadBadge(count: unreadCount),
+          ],
         ],
-      ],
+      ),
     );
   }
 }

@@ -46,7 +46,7 @@ class _WispBootstrap extends StatefulWidget {
 }
 
 class _WispBootstrapState extends State<_WispBootstrap> {
-  late final Future<void> _initFuture;
+  late Future<void> _initFuture;
 
   @override
   void initState() {
@@ -76,13 +76,38 @@ class _WispBootstrapState extends State<_WispBootstrap> {
     );
   }
 
+  void _retry() {
+    setState(() {
+      _initFuture = _initialize();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<void>(
       future: _initFuture,
       builder: (context, snapshot) {
+        // BUGFIX: this used to only branch on `connectionState`, so an
+        // init failure (bad/missing .env, unreachable Supabase project,
+        // etc.) was silently swallowed — `connectionState` becomes
+        // `done` whether the future succeeded OR errored, and the old
+        // code fell straight through to `WispApp()` either way. That
+        // meant a genuine init failure looked identical, from the
+        // user's side, to "the app is just stuck" — no error, no
+        // signal, nothing actionable in the UI, only whatever got
+        // printed to the terminal. Checking `snapshot.hasError`
+        // explicitly here means a real init failure now surfaces as a
+        // visible, retryable error screen instead of quietly limping
+        // into `WispApp()` with an uninitialized Supabase/AI/WebRTC
+        // client underneath it.
         if (snapshot.connectionState != ConnectionState.done) {
           return const _SplashApp();
+        }
+        if (snapshot.hasError) {
+          return _InitErrorApp(
+            error: snapshot.error!,
+            onRetry: _retry,
+          );
         }
         return const WispApp();
       },
@@ -122,6 +147,60 @@ class _SplashScreen extends StatelessWidget {
         child: Image(
           image: AssetImage('assets/images/logo.png'),
           width: 160,
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown only when `_WispBootstrapState._initialize()` genuinely throws
+/// (bad/missing `.env`, unreachable Supabase project, etc.) — replaces
+/// what used to be a silent fall-through into a broken `WispApp()`.
+/// Deliberately a standalone `MaterialApp` for the same reason
+/// `_SplashApp` is: nothing here can depend on `routerProvider`.
+class _InitErrorApp extends StatelessWidget {
+  const _InitErrorApp({required this.error, required this.onRetry});
+
+  final Object error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.dark,
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.dark,
+      home: Scaffold(
+        backgroundColor: AppColors.backgroundBase,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline,
+                    color: AppColors.error, size: 40),
+                const SizedBox(height: 16),
+                Text(
+                  'Wisp couldn\'t start',
+                  style: Theme.of(context).textTheme.titleMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '$error',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                FilledButton(
+                  onPressed: onRetry,
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

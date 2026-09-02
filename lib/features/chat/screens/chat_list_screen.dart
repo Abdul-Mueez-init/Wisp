@@ -210,12 +210,12 @@ class _AiChatTile extends StatelessWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
-      trailing: summary?.lastMessage != null
-          ? Text(
-              formatChatTimestamp(summary!.lastMessage!.createdAt),
-              style: Theme.of(context).textTheme.labelSmall,
-            )
-          : null,
+      trailing: _TrailingColumn(
+        timestamp: summary?.lastMessage != null
+            ? formatChatTimestamp(summary!.lastMessage!.createdAt)
+            : null,
+        unreadCount: summary?.unreadCount ?? 0,
+      ),
     );
   }
 
@@ -307,12 +307,12 @@ class _ChatListTile extends ConsumerWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
-      trailing: summary.lastMessage != null
-          ? Text(
-              formatChatTimestamp(summary.lastMessage!.createdAt),
-              style: Theme.of(context).textTheme.labelSmall,
-            )
-          : null,
+      trailing: _TrailingColumn(
+        timestamp: summary.lastMessage != null
+            ? formatChatTimestamp(summary.lastMessage!.createdAt)
+            : null,
+        unreadCount: summary.unreadCount,
+      ),
       onTap: () => context.push(
         '/chat/${summary.conversation.id}',
         extra: summary.conversation.isDirect
@@ -344,6 +344,74 @@ class _ChatListTile extends ConsumerWidget {
       default:
         return message.content ?? '';
     }
+  }
+}
+
+/// Phase 3 (wisp_fixes_handoff.md item 3, step 3) — timestamp stacked
+/// above the unread badge, shared by [_AiChatTile] and [_ChatListTile]
+/// so both tile types render the badge identically. Consumes the
+/// existing design.md "Unread Badge: Moderate Green circle with Cream
+/// label-sm text" token — no new colors/spacing invented, just the
+/// same `AppColors.primaryContainer`/`AppColors.cream` pairing already
+/// used for "Moderate Green" everywhere else in this codebase (sent
+/// message bubbles, primary buttons).
+class _TrailingColumn extends StatelessWidget {
+  const _TrailingColumn({required this.timestamp, required this.unreadCount});
+
+  final String? timestamp;
+  final int unreadCount;
+
+  @override
+  Widget build(BuildContext context) {
+    if (timestamp == null && unreadCount <= 0) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        if (timestamp != null)
+          Text(
+            timestamp!,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: unreadCount > 0
+                      ? AppColors.primary
+                      : AppColors.onSurfaceVariant,
+                ),
+          ),
+        if (unreadCount > 0) ...[
+          const SizedBox(height: 6),
+          _UnreadBadge(count: unreadCount),
+        ],
+      ],
+    );
+  }
+}
+
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 20),
+      height: 20,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      decoration: BoxDecoration(
+        color: AppColors.primaryContainer,
+        borderRadius: BorderRadius.circular(AppRadius.full),
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: AppColors.cream,
+              fontWeight: FontWeight.w500,
+            ),
+      ),
+    );
   }
 }
 

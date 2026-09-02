@@ -65,8 +65,16 @@ class AppRadius {
   static const full = 9999.0;
 
   // Component-specific, from design.md "Shapes"
-  static const messageBubble = 14.0;
-  static const messageBubbleTail = 4.0;
+  //
+  // Phase 4 (wisp_fixes_handoff.md item 5) — bumped from 14/4 (a
+  // reduced-radius "tail" corner) to a uniform, fully-rounded,
+  // Instagram-style corner set on all four corners. Values-only
+  // change: message_bubble.dart already reads both tokens off
+  // AppRadius and keys the tail corner purely off `isMine`, so
+  // setting them equal collapses that distinction with zero logic
+  // edits there.
+  static const messageBubble = 18.0;
+  static const messageBubbleTail = 18.0;
   static const buttonInput = 16.0; // rounded-lg standard
 }
 

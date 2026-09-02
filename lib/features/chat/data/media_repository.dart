@@ -2,7 +2,6 @@
 import 'dart:typed_data';
 
 import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/errors/failure.dart';
@@ -14,6 +13,17 @@ import '../../../core/errors/failure.dart';
 /// get back a storage PATH from upload and must resolve a short-lived
 /// signed URL to actually display/download the file — never
 /// `getPublicUrl`.
+///
+/// Cleanup note: this file used to also declare its own
+/// `mediaRepositoryProvider`, duplicating the one in
+/// `providers/message_provider.dart` — the only place anything actually
+/// imported it from. Both wrapped the same `Supabase.instance.client`,
+/// so it was a behaviorless duplicate, not a bug, but it broke this
+/// codebase's own convention (every other repository's provider —
+/// `messageRepositoryProvider`, `conversationRepositoryProvider`, etc.
+/// — lives in its feature's `providers/` file, never in `data/`).
+/// Removed here; `mediaRepositoryProvider` now has exactly one
+/// declaration, in `message_provider.dart`.
 class MediaRepository {
   MediaRepository(this._client);
   final SupabaseClient _client;
@@ -187,7 +197,3 @@ class MediaFileInfo {
   final String fileName;
   final int? sizeBytes;
 }
-
-final mediaRepositoryProvider = Provider<MediaRepository>((ref) {
-  return MediaRepository(Supabase.instance.client);
-});

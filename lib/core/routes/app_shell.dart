@@ -26,6 +26,14 @@ import '../theme/app_theme.dart';
 /// actually selected. `IndexedStack` still keeps every *built* tab's
 /// state alive when switching away from it — only the up-front eager
 /// construction of tabs the user hasn't opened yet is gone.
+///
+/// Phase 4 (wisp_fixes_handoff.md item 4) — the bottom nav itself was
+/// rebuilt from Material's stock `NavigationBar` into a floating pill
+/// shape matching the Jazz-World reference screenshot's shape language
+/// (rounded container, filled active-state background). Layout/shape
+/// change only, built entirely from tokens already in app_theme.dart —
+/// no new colors, and the `_index`/`_builtIndexes`/`IndexedStack` logic
+/// above is untouched.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -65,33 +73,126 @@ class _AppShellState extends State<AppShell> {
             _builtIndexes.contains(i) ? _screens[i] : const SizedBox.shrink(),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
+      bottomNavigationBar: _PillNavBar(
         selectedIndex: _index,
-        onDestinationSelected: _onDestinationSelected,
-        backgroundColor: AppColors.surfaceContainerLow,
-        indicatorColor: AppColors.primaryContainer,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.chat_bubble_outline),
-            selectedIcon: Icon(Icons.chat_bubble, color: AppColors.primary),
-            label: 'Chats',
+        onSelect: _onDestinationSelected,
+      ),
+    );
+  }
+}
+
+/// Floating pill-shaped nav bar (Phase 4). A rounded container floating
+/// above the page margin, each destination rendered by [_PillNavItem];
+/// the selected one grows an inline pill of its own
+/// (`AppColors.primaryContainer`, same "Moderate Green" fill design.md
+/// uses for sent bubbles and primary buttons) around its icon + label,
+/// mirroring the Jazz-World reference's active-tab treatment.
+class _PillNavBar extends StatelessWidget {
+  const _PillNavBar({required this.selectedIndex, required this.onSelect});
+
+  final int selectedIndex;
+  final ValueChanged<int> onSelect;
+
+  static const _items = [
+    (
+      icon: Icons.chat_bubble_outline,
+      selectedIcon: Icons.chat_bubble,
+      label: 'Chats',
+    ),
+    (
+      icon: Icons.donut_large_outlined,
+      selectedIcon: Icons.donut_large,
+      label: 'Status',
+    ),
+    (icon: Icons.call_outlined, selectedIcon: Icons.call, label: 'Calls'),
+    (
+      icon: Icons.settings_outlined,
+      selectedIcon: Icons.settings,
+      label: 'Settings',
+    ),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.pageMargin),
+        child: Container(
+          height: 64,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(AppRadius.full),
+            border: Border.all(
+              color: AppColors.outlineVariant.withValues(alpha: 0.15),
+            ),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.donut_large_outlined),
-            selectedIcon: Icon(Icons.donut_large, color: AppColors.primary),
-            label: 'Status',
+          child: Row(
+            children: [
+              for (var i = 0; i < _items.length; i++)
+                Expanded(
+                  child: _PillNavItem(
+                    item: _items[i],
+                    selected: i == selectedIndex,
+                    onTap: () => onSelect(i),
+                  ),
+                ),
+            ],
           ),
-          NavigationDestination(
-            icon: Icon(Icons.call_outlined),
-            selectedIcon: Icon(Icons.call, color: AppColors.primary),
-            label: 'Calls',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            selectedIcon: Icon(Icons.settings, color: AppColors.primary),
-            label: 'Settings',
-          ),
-        ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PillNavItem extends StatelessWidget {
+  const _PillNavItem({
+    required this.item,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final ({IconData icon, IconData selectedIcon, String label}) item;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        margin: const EdgeInsets.symmetric(vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.primaryContainer : Colors.transparent,
+          borderRadius: BorderRadius.circular(AppRadius.full),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              selected ? item.selectedIcon : item.icon,
+              size: 22,
+              color: selected ? AppColors.primary : AppColors.outline,
+            ),
+            if (selected) ...[
+              const SizedBox(width: 6),
+              Text(
+                item.label,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.w500,
+                    ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

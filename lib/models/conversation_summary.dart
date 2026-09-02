@@ -14,10 +14,24 @@ class ConversationSummary {
   final Profile? otherProfile;
   final Message? lastMessage;
 
+  /// Phase 3 (wisp_fixes_handoff.md item 3) — count of this
+  /// conversation's incoming messages not yet marked 'read' by the
+  /// current user. Derived client-side in
+  /// `ConversationRepository._fetchSummary`, same "computed here, not
+  /// a new ERD.md column" shape as [isAiConversation] below. Uses the
+  /// exact same "incoming" definition `MessageRepository.markRead`
+  /// already uses (`sender_id != myId`, which excludes AI-authored
+  /// rows since those have a null `sender_id` and Postgrest's `neq`
+  /// doesn't match nulls) — deliberately, so this count and the set
+  /// `markRead` actually clears always agree; otherwise a badge could
+  /// show a count that opening the chat can never bring to zero.
+  final int unreadCount;
+
   const ConversationSummary({
     required this.conversation,
     this.otherProfile,
     this.lastMessage,
+    this.unreadCount = 0,
   });
 
   /// Phase 8 — derived, not stored (per `ConversationRepository

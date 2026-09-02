@@ -238,10 +238,10 @@ class ConversationRepository {
     }
   }
 
-  /// One conversation's pair of lookups (other member + last message),
-  /// run concurrently with each other via [Future.wait] — the unit of
-  /// work [fetchMyConversationSummaries] then fans out across all of a
-  /// user's conversations at once.
+  /// One conversation's trio of lookups (other member + last message +
+  /// unread count), run concurrently with each other via [Future.wait]
+  /// — the unit of work [fetchMyConversationSummaries] then fans out
+  /// across all of a user's conversations at once.
   Future<ConversationSummary> _fetchSummary({
     required Conversation conversation,
     required String myId,
@@ -257,16 +257,56 @@ class ConversationRepository {
           .order('created_at', ascending: false)
           .limit(1)
           .maybeSingle(),
+      _fetchUnreadCount(conversationId: conversation.id, myId: myId),
     ]);
 
     final otherProfile = results[0] as Profile?;
     final lastMessageRow = results[1] as Map<String, dynamic>?;
+    final unreadCount = results[2] as int;
 
     return ConversationSummary(
       conversation: conversation,
       otherProfile: otherProfile,
       lastMessage:
           lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
+      unreadCount: unreadCount,
     );
+  }
+
+  /// Phase 3 (wisp_fixes_handoff.md item 3, step 1) — count of
+  /// [conversationId]'s incoming messages not yet 'read' by [myId].
+  /// One query: fetch every incoming message id (mirroring
+  /// `MessageRepository._incomingMessageIds`'s `neq('sender_id', myId)`
+  /// exactly, for the reason documented on
+  /// `ConversationSummary.unreadCount`), each with its
+  /// `message_status` rows embedded unfiltered — same "fetch related
+  /// rows unfiltered, then reason about them client-side" shape
+  /// `StoryRepository.fetchActiveStoryGroups` already uses for
+  /// `story_views`, rather than trying to filter the embedded resource
+  /// itself (which would force an inner join and silently drop
+  /// messages with no status row yet — exactly the "delivered" gap
+  /// this count needs to catch). A message counts as unread unless one
+  /// of its embedded status rows belongs to [myId] with status='read'.
+  Future<int> _fetchUnreadCount({
+    required String conversationId,
+    required String myId,
+  }) async {
+    final rows = await _client
+        .from('messages')
+        .select('id, message_status(user_id, status)')
+        .eq('conversation_id', conversationId)
+        .neq('sender_id', myId);
+
+    var unread = 0;
+    for (final raw in rows as List) {
+      final row = raw as Map<String, dynamic>;
+      final statusRows = (row['message_status'] as List?) ?? const [];
+      final isReadByMe = statusRows.any((s) {
+        final status = s as Map<String, dynamic>;
+        return status['user_id'] == myId && status['status'] == 'read';
+      });
+      if (!isReadByMe) unread++;
+    }
+    return unread;
   }
 }

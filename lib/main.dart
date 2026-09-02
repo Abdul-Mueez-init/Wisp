@@ -14,28 +14,118 @@ import 'features/chat/providers/presence_provider.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  runApp(const ProviderScope(child: _WispBootstrap()));
+}
 
-  await dotenv.load(fileName: '.env');
+/// Phase 5 (wisp_fixes_handoff.md item 2) — the branded launch screen.
+///
+/// Before this phase, `main()` awaited the *entire* init sequence
+/// (dotenv → Supabase → AI config → WebRTC config) before ever calling
+/// `runApp()` — so Flutter had nothing to paint until all four steps
+/// resolved, meaning whatever the OS shows before the first frame (a
+/// blank/white window, platform-dependent) was the de facto "splash."
+/// This widget flips that: `runApp()` now fires immediately with
+/// `_WispBootstrap`, which shows [_SplashScreen] while running that
+/// exact same init sequence inside `initState`, then swaps to the real
+/// [WispApp] once it resolves. No fixed delay is added anywhere — the
+/// splash is on screen for exactly as long as init actually takes, per
+/// the phase's acceptance criteria.
+///
+/// [WispApp] itself can't be built any earlier than this: its
+/// `MaterialApp.router` reads `routerProvider`, which watches
+/// `currentSessionProvider` — Supabase's auth state — so the real
+/// router genuinely cannot exist before `SupabaseConfig.initialize()`
+/// resolves. `_SplashScreen` is rendered inside its own minimal
+/// `MaterialApp` for exactly that reason: it can't depend on anything
+/// `routerProvider` provides.
+class _WispBootstrap extends StatefulWidget {
+  const _WispBootstrap();
 
-  await SupabaseConfig.initialize(
-    url: dotenv.env['SUPABASE_URL'] ?? '',
-    anonKey: dotenv.env['SUPABASE_ANON_KEY'] ?? '',
-  );
+  @override
+  State<_WispBootstrap> createState() => _WispBootstrapState();
+}
 
-  AiConfig.initialize(
-    geminiApiKey: dotenv.env['GEMINI_API_KEY'] ?? '',
-    groqApiKey: dotenv.env['GROQ_API_KEY'] ?? '',
-  );
+class _WispBootstrapState extends State<_WispBootstrap> {
+  late final Future<void> _initFuture;
 
-  // Phase 10 — TURN creds optional at first run; STUN-only fallback
-  // inside WebrtcConfig keeps calls working before you fill these in.
-  WebrtcConfig.initialize(
-    turnUrl: dotenv.env['TURN_URL'] ?? '',
-    turnUsername: dotenv.env['TURN_USERNAME'] ?? '',
-    turnCredential: dotenv.env['TURN_CREDENTIAL'] ?? '',
-  );
+  @override
+  void initState() {
+    super.initState();
+    _initFuture = _initialize();
+  }
 
-  runApp(const ProviderScope(child: WispApp()));
+  Future<void> _initialize() async {
+    await dotenv.load(fileName: '.env');
+
+    await SupabaseConfig.initialize(
+      url: dotenv.env['SUPABASE_URL'] ?? '',
+      anonKey: dotenv.env['SUPABASE_ANON_KEY'] ?? '',
+    );
+
+    AiConfig.initialize(
+      geminiApiKey: dotenv.env['GEMINI_API_KEY'] ?? '',
+      groqApiKey: dotenv.env['GROQ_API_KEY'] ?? '',
+    );
+
+    // Phase 10 — TURN creds optional at first run; STUN-only fallback
+    // inside WebrtcConfig keeps calls working before you fill these in.
+    WebrtcConfig.initialize(
+      turnUrl: dotenv.env['TURN_URL'] ?? '',
+      turnUsername: dotenv.env['TURN_USERNAME'] ?? '',
+      turnCredential: dotenv.env['TURN_CREDENTIAL'] ?? '',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<void>(
+      future: _initFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const _SplashApp();
+        }
+        return const WispApp();
+      },
+    );
+  }
+}
+
+/// A standalone `MaterialApp` just for the splash frame(s) — deliberately
+/// not `MaterialApp.router`, since [WispApp]'s router isn't safe to
+/// build yet at this point (see [_WispBootstrap]'s doc comment).
+class _SplashApp extends StatelessWidget {
+  const _SplashApp();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: AppTheme.dark,
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.dark,
+      home: const _SplashScreen(),
+    );
+  }
+}
+
+/// Brand mark — Phase 5's Wisp logo, dropped in at
+/// `assets/images/logo.png` and registered in pubspec.yaml's
+/// `flutter.assets` list, next to the existing `.env` entry.
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: AppColors.backgroundBase,
+      body: Center(
+        child: Image(
+          image: AssetImage('assets/images/logo.png'),
+          width: 160,
+        ),
+      ),
+    );
+  }
 }
 
 class WispApp extends ConsumerWidget {

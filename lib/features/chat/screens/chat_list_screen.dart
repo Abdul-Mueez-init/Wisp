@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/constants/layout_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/format_utils.dart';
 import '../../../models/conversation_summary.dart';
@@ -152,6 +153,16 @@ class ChatListScreen extends ConsumerWidget {
                   ),
                 );
               },
+            ),
+            // Jazz-World glass-nav pass: AppShell now runs
+            // `extendBody: true` so this list's real content scrolls
+            // behind the floating pill nav. Without this trailing gap,
+            // the last conversation row would end up permanently
+            // hidden under the (semi-transparent but still occluding)
+            // pill instead of being able to scroll fully into view
+            // above it.
+            const SliverPadding(
+              padding: EdgeInsets.only(bottom: kFloatingNavClearance),
             ),
           ],
         ),

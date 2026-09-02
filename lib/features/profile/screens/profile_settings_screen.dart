@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/constants/language_options.dart';
+import '../../../core/constants/layout_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../providers/profile_provider.dart';
@@ -113,7 +114,15 @@ class _ProfileSettingsScreenState extends ConsumerState<ProfileSettingsScreen> {
               : null;
 
           return SingleChildScrollView(
-            padding: const EdgeInsets.all(AppSpacing.pageMargin),
+            // Jazz-World glass-nav pass: extra trailing space so the
+            // "Sign out" button can scroll clear of AppShell's floating
+            // pill nav (now `extendBody: true`, real content behind it).
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.pageMargin,
+              AppSpacing.pageMargin,
+              AppSpacing.pageMargin,
+              AppSpacing.pageMargin + kFloatingNavClearance,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/constants/layout_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/format_utils.dart';
 import '../../../models/call.dart';
@@ -93,6 +94,10 @@ class _CallsTabScreenState extends ConsumerState<CallsTabScreen> {
           if (sorted.isEmpty) return const _EmptyState();
 
           return ListView.separated(
+            // Jazz-World glass-nav pass: extra trailing space so the
+            // last call row can scroll clear of AppShell's floating
+            // pill nav (now `extendBody: true`, real content behind it).
+            padding: const EdgeInsets.only(bottom: kFloatingNavClearance),
             itemCount: sorted.length,
             separatorBuilder: (_, __) => Divider(
               height: 1,

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../core/constants/layout_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/format_utils.dart';
 import '../../../models/story.dart';
@@ -52,7 +53,13 @@ class StatusListScreen extends ConsumerWidget {
             final viewed = others.where((g) => g.allViewed).toList();
 
             return ListView(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              // Jazz-World glass-nav pass: extra trailing space so the
+              // last row can scroll clear of AppShell's floating pill
+              // nav (now `extendBody: true`, real content behind it).
+              padding: const EdgeInsets.only(
+                top: 8,
+                bottom: 8 + kFloatingNavClearance,
+              ),
               children: [
                 const _SectionLabel('My status'),
                 _MyStatusTile(group: myGroup),

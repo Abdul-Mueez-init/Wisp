@@ -27,6 +27,9 @@ class CallSessionState {
     this.isVideo = false,
     this.isMuted = false,
     this.isCameraOff = false,
+    this.isSpeakerOn = false,
+    this.isRemoteRinging = false,
+    this.callConnectedAt,
     this.errorMessage,
   });
 
@@ -36,6 +39,24 @@ class CallSessionState {
   final bool isVideo;
   final bool isMuted;
   final bool isCameraOff;
+
+  /// Ear-speaker (false) vs phone-speaker (true). Video calls default to
+  /// true, audio calls to false — see `WebrtcSession.initLocalMedia`.
+  final bool isSpeakerOn;
+
+  /// True once the callee's device has actually joined the signaling
+  /// channel (app alive, online) and sent back a `ringing_ack` — this is
+  /// what flips the caller's own screen from "Calling…" to "Ringing…",
+  /// mirroring WhatsApp. Only meaningful on the caller side; the callee
+  /// never reads it.
+  final bool isRemoteRinging;
+
+  /// Wall-clock moment the call reached `active` on THIS device — set
+  /// once, from either the caller's `onAnswer` handler or the callee's
+  /// own `answerCall()` success path. Purely a UI concern (the in-call
+  /// duration timer); never persisted, unlike `Call.startedAt`/`endedAt`.
+  final DateTime? callConnectedAt;
+
   final String? errorMessage;
 
   bool get isIdle => phase == CallPhase.idle;
@@ -49,6 +70,9 @@ class CallSessionState {
     bool? isVideo,
     bool? isMuted,
     bool? isCameraOff,
+    bool? isSpeakerOn,
+    bool? isRemoteRinging,
+    DateTime? callConnectedAt,
     String? errorMessage,
   }) {
     return CallSessionState(
@@ -58,6 +82,9 @@ class CallSessionState {
       isVideo: isVideo ?? this.isVideo,
       isMuted: isMuted ?? this.isMuted,
       isCameraOff: isCameraOff ?? this.isCameraOff,
+      isSpeakerOn: isSpeakerOn ?? this.isSpeakerOn,
+      isRemoteRinging: isRemoteRinging ?? this.isRemoteRinging,
+      callConnectedAt: callConnectedAt ?? this.callConnectedAt,
       errorMessage: errorMessage,
     );
   }

@@ -16,6 +16,14 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 ///
 /// `self: false` on the channel means this client never receives its
 /// own broadcasts back — no need to filter out self-sent events.
+///
+/// Bugfix/feature addition: `ringing_ack` is a new broadcast event, sent
+/// by the callee the instant their device joins this channel (i.e. the
+/// instant their app is alive, online, and actually ringing). It's the
+/// signal the caller side uses to flip its own UI from "Calling…" to
+/// "Ringing…" — mirroring WhatsApp's calling → ringing transition —
+/// without adding anything to the persisted `calls` table, since it's
+/// exactly as ephemeral/chatty as everything else on this channel.
 class SignalingRepository {
   SignalingRepository(this._client, this.callId);
 
@@ -29,12 +37,14 @@ class SignalingRepository {
   final _iceCandidateController =
       StreamController<Map<String, dynamic>>.broadcast();
   final _hangupController = StreamController<void>.broadcast();
+  final _ringingAckController = StreamController<void>.broadcast();
 
   Stream<Map<String, dynamic>> get onOffer => _offerController.stream;
   Stream<Map<String, dynamic>> get onAnswer => _answerController.stream;
   Stream<Map<String, dynamic>> get onIceCandidate =>
       _iceCandidateController.stream;
   Stream<void> get onHangup => _hangupController.stream;
+  Stream<void> get onRingingAck => _ringingAckController.stream;
 
   /// Joins this call's dedicated channel. Must be called (and its
   /// returned future awaited, or at least started) before any `send*`
@@ -65,6 +75,10 @@ class SignalingRepository {
           event: 'hangup',
           callback: (_) => _hangupController.add(null),
         )
+        .onBroadcast(
+          event: 'ringing_ack',
+          callback: (_) => _ringingAckController.add(null),
+        )
         .subscribe((status, error) {
       if (status == RealtimeSubscribeStatus.subscribed &&
           !completer.isCompleted) {
@@ -87,6 +101,8 @@ class SignalingRepository {
 
   Future<void> sendHangup() => _send('hangup', const {});
 
+  Future<void> sendRingingAck() => _send('ringing_ack', const {});
+
   Future<void> _send(String event, Map<String, dynamic> payload) async {
     final channel = _channel;
     if (channel == null) return;
@@ -105,5 +121,6 @@ class SignalingRepository {
     await _answerController.close();
     await _iceCandidateController.close();
     await _hangupController.close();
+    await _ringingAckController.close();
   }
 }

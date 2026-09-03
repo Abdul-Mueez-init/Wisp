@@ -7,6 +7,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCPeerConnectionState;
 import '../../../config/supabase_config.dart';
 import '../../../models/call.dart';
 import '../../auth/providers/auth_provider.dart';
+import '../data/call_sound_player.dart';
 import '../data/signaling_repository.dart';
 import '../data/webrtc_session.dart';
 import 'call_provider.dart';
@@ -15,27 +16,54 @@ import 'call_session_state.dart';
 /// Owns the whole call lifecycle end to end: place a call, detect and
 /// answer/decline an incoming one, and hang up — wiring
 /// [SignalingRepository] (SDP/ICE transport), [WebrtcSession] (the
-/// peer connection itself), and [CallRepository] (persisted
-/// ringing/ongoing/ended/missed/declined history) together. Same
-/// `Notifier<State>` shape as `LiveLocationController` in
-/// features/location — a single long-lived controller for a lifecycle
-/// with an explicit start/active/stop shape, not a one-shot
-/// `AsyncNotifier` action.
+/// peer connection itself), [CallSoundPlayer] (ring/dial tone), and
+/// [CallRepository] (persisted ringing/ongoing/ended/missed/declined
+/// history) together. Same `Notifier<State>` shape as
+/// `LiveLocationController` in features/location — a single long-lived
+/// controller for a lifecycle with an explicit start/active/stop shape,
+/// not a one-shot `AsyncNotifier` action.
 ///
 /// Only one call is ever active on this device at a time — matches
 /// PRD.md §11's 1-on-1-only scope and avoids juggling two peer
 /// connections.
+///
+/// Bugfix/feature session changes (all confined to this file + the
+/// three data-layer files it composes — no schema change, per Rule 7,
+/// since none of this is persisted; it's exactly as ephemeral as the
+/// existing SDP/ICE signaling this already sits alongside):
+///   1. Caller-side "Calling…" -> "Ringing…" via a new `ringing_ack`
+///      signaling event (see `isRemoteRinging` on the state).
+///   2. `_onPeerConnectionStateChanged` no longer hangs up on the very
+///      first `disconnected` tick — that state is frequently transient
+///      during/just-after ICE negotiation and often self-heals. A grace
+///      timer gives it a real chance to recover before ending the call.
+///      `failed` remains terminal (per the WebRTC spec) and still ends
+///      immediately — if this fires right after answering, check that
+///      `.env`'s TURN_URL/TURN_USERNAME/TURN_CREDENTIAL are real values;
+///      STUN-only ICE often can't traverse mobile-carrier NATs at all.
+///   3. Incoming video calls now grab the camera/mic (for a live
+///      preview) the moment the ring appears, not only after Accept is
+///      tapped — mirrors WhatsApp, and `answerCall()` reuses that same
+///      session instead of a second `getUserMedia()` call.
+///   4. `callConnectedAt` is stamped the moment either side reaches
+///      `active`, for the in-call duration timer (UI-only, not
+///      persisted — `Call.startedAt`/`endedAt` already covers history).
+///   5. `CallSoundPlayer` starts/stops purely off phase transitions.
 class CallController extends Notifier<CallSessionState> {
   WebrtcSession? _session;
   SignalingRepository? _signaling;
+  final CallSoundPlayer _sound = CallSoundPlayer();
 
   StreamSubscription<Map<String, dynamic>>? _offerSub;
   StreamSubscription<Map<String, dynamic>>? _answerSub;
   StreamSubscription<Map<String, dynamic>>? _iceSub;
   StreamSubscription<void>? _hangupSub;
+  StreamSubscription<void>? _ringingAckSub;
 
   Map<String, dynamic>? _pendingOffer;
   String? _watchedIncomingCallId;
+  Timer? _ringingAckResendTimer;
+  Timer? _reconnectGraceTimer;
 
   @override
   CallSessionState build() {
@@ -76,6 +104,7 @@ class CallController extends Notifier<CallSessionState> {
       otherUserId: calleeId,
       isVideo: isVideo,
     );
+    _syncSound();
 
     try {
       final call = await ref.read(callRepositoryProvider).createCall(
@@ -84,6 +113,7 @@ class CallController extends Notifier<CallSessionState> {
             type: isVideo ? 'video' : 'audio',
           );
       state = state.copyWith(phase: CallPhase.outgoingRinging, call: call);
+      _syncSound();
 
       final signaling = SignalingRepository(SupabaseConfig.client, call.id);
       _signaling = signaling;
@@ -95,7 +125,12 @@ class CallController extends Notifier<CallSessionState> {
       session.onLocalIceCandidate =
           (c) => signaling.sendIceCandidate(WebrtcSession.candidateToJson(c));
       session.onConnectionStateChanged = _onPeerConnectionStateChanged;
+      // Grabs the camera immediately (before the offer is even sent) —
+      // this is the "WhatsApp opens the camera on the caller side even
+      // before the call connects" behavior; nothing new needed here,
+      // it already worked this way.
       await session.init(isVideo: isVideo);
+      state = state.copyWith(isSpeakerOn: session.isSpeakerOn);
 
       final offer = await session.createOffer();
       await signaling.sendOffer(offer);
@@ -116,9 +151,11 @@ class CallController extends Notifier<CallSessionState> {
   // ---------------------------------------------------------------
 
   /// Fired by the [incomingRingingCallProvider] listener in [build].
-  /// Joins the call's signaling channel right away and buffers the
-  /// offer as soon as it arrives, so [answerCall] has zero signaling
-  /// latency once the user actually taps Accept.
+  /// Joins the call's signaling channel right away, sends the
+  /// `ringing_ack` that flips the caller's UI to "Ringing…", and — for
+  /// video calls — grabs the camera immediately for a live preview,
+  /// before the user has even tapped Accept. Also buffers the offer as
+  /// soon as it arrives, so [answerCall] has zero signaling latency.
   Future<void> _handleIncomingCall(Call call) async {
     if (!state.isIdle) return; // already on a call — let it ring out.
 
@@ -128,12 +165,50 @@ class CallController extends Notifier<CallSessionState> {
       otherUserId: call.callerId,
       isVideo: call.isVideo,
     );
+    _syncSound();
 
     final signaling = SignalingRepository(SupabaseConfig.client, call.id);
     _signaling = signaling;
     _wireSignalingListeners(signaling);
     _offerSub ??= signaling.onOffer.listen((offer) => _pendingOffer = offer);
     await signaling.join();
+
+    // Tell the caller we're actually ringing (app running, device
+    // online) — this is what flips their screen from "Calling…" to
+    // "Ringing…". Sent once immediately, then re-sent every couple of
+    // seconds while still ringing, in case the very first broadcast
+    // races the caller's listener being wired up (broadcast channels
+    // don't replay missed messages, so a single lost packet would
+    // otherwise leave the caller stuck on "Calling…" for the whole
+    // call).
+    unawaited(signaling.sendRingingAck());
+    _ringingAckResendTimer?.cancel();
+    _ringingAckResendTimer = Timer.periodic(const Duration(seconds: 2), (t) {
+      if (state.phase == CallPhase.incomingRinging &&
+          state.call?.id == call.id) {
+        unawaited(signaling.sendRingingAck());
+      } else {
+        t.cancel();
+      }
+    });
+
+    // WhatsApp-style: open the camera preview immediately for an
+    // incoming video call, not only after Accept is tapped.
+    if (call.isVideo) {
+      try {
+        final session = WebrtcSession();
+        _session = session;
+        await session.initLocalMedia(isVideo: true);
+        if (state.call?.id == call.id) {
+          state = state.copyWith(isSpeakerOn: session.isSpeakerOn);
+        }
+      } catch (_) {
+        // Best-effort preview only — if this fails (e.g. permission
+        // denied), answerCall() retries initLocalMedia itself and
+        // surfaces the real error there if it still fails.
+        _session = null;
+      }
+    }
   }
 
   /// Accepts the currently-ringing incoming call.
@@ -143,14 +218,25 @@ class CallController extends Notifier<CallSessionState> {
     final call = state.call;
     if (signaling == null || call == null) return false;
 
+    _ringingAckResendTimer?.cancel();
     state = state.copyWith(phase: CallPhase.connecting);
+    _syncSound();
     try {
-      final session = WebrtcSession();
+      // Reuse the session already opened for the live camera/mic
+      // preview during incomingRinging (video calls) instead of
+      // grabbing media a second time — avoids a duplicate
+      // getUserMedia() call and a jarring re-permission prompt right as
+      // the user taps Accept.
+      final session = _session ?? WebrtcSession();
       _session = session;
       session.onLocalIceCandidate =
           (c) => signaling.sendIceCandidate(WebrtcSession.candidateToJson(c));
       session.onConnectionStateChanged = _onPeerConnectionStateChanged;
-      await session.init(isVideo: state.isVideo);
+      if (!session.hasLocalMedia) {
+        await session.initLocalMedia(isVideo: state.isVideo);
+      }
+      await session.initPeerConnection();
+      state = state.copyWith(isSpeakerOn: session.isSpeakerOn);
 
       // The offer may not have arrived yet even though the caller
       // sends it almost immediately — wait briefly rather than
@@ -162,7 +248,11 @@ class CallController extends Notifier<CallSessionState> {
       await ref
           .read(callRepositoryProvider)
           .updateStatus(callId: call.id, status: 'ongoing');
-      state = state.copyWith(phase: CallPhase.active);
+      state = state.copyWith(
+        phase: CallPhase.active,
+        callConnectedAt: DateTime.now(),
+      );
+      _syncSound();
       return true;
     } catch (e) {
       state = state.copyWith(errorMessage: 'Could not answer the call: $e');
@@ -174,6 +264,7 @@ class CallController extends Notifier<CallSessionState> {
   /// Rejects the currently-ringing incoming call without answering.
   Future<void> declineCall() async {
     if (state.phase != CallPhase.incomingRinging) return;
+    _ringingAckResendTimer?.cancel();
     final call = state.call;
     if (call != null) {
       try {
@@ -229,6 +320,7 @@ class CallController extends Notifier<CallSessionState> {
 
   Future<void> _endLocally() async {
     state = state.copyWith(phase: CallPhase.ended);
+    _syncSound();
     await _cleanupSession();
     state = CallSessionState.idle;
   }
@@ -244,6 +336,14 @@ class CallController extends Notifier<CallSessionState> {
   }
 
   Future<void> switchCamera() => _session?.switchCamera() ?? Future.value();
+
+  /// Ear-speaker <-> phone-speaker toggle, available both while ringing
+  /// (the caller's mic/speaker session is already live at that point)
+  /// and during an active call.
+  Future<void> toggleSpeaker() async {
+    await _session?.toggleSpeaker();
+    state = state.copyWith(isSpeakerOn: _session?.isSpeakerOn ?? false);
+  }
 
   /// Best-effort hangup broadcast, bounded so a stuck signaling socket
   /// can never block Cancel/End from completing locally. Not fatal if
@@ -269,7 +369,11 @@ class CallController extends Notifier<CallSessionState> {
       await ref
           .read(callRepositoryProvider)
           .updateStatus(callId: call.id, status: 'ongoing');
-      state = state.copyWith(phase: CallPhase.active);
+      state = state.copyWith(
+        phase: CallPhase.active,
+        callConnectedAt: DateTime.now(),
+      );
+      _syncSound();
     });
 
     _iceSub = signaling.onIceCandidate.listen((candidate) {
@@ -277,14 +381,62 @@ class CallController extends Notifier<CallSessionState> {
     });
 
     _hangupSub = signaling.onHangup.listen((_) => _onRemoteHangup());
+
+    // Caller-side "Calling…" -> "Ringing…" — harmless no-op on the
+    // callee side, since `self: false` means a client never receives
+    // its own broadcasts back anyway.
+    _ringingAckSub = signaling.onRingingAck.listen((_) {
+      if (!state.isRemoteRinging) {
+        state = state.copyWith(isRemoteRinging: true);
+      }
+    });
   }
 
   void _onPeerConnectionStateChanged(RTCPeerConnectionState pcState) {
-    if (pcState == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-        pcState == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-      // Best-effort: a dropped connection ends the call locally rather
-      // than leaving the UI stuck in 'active' with dead media.
-      unawaited(endCall());
+    switch (pcState) {
+      case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+        _reconnectGraceTimer?.cancel();
+        _reconnectGraceTimer = null;
+        break;
+      case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        // 'disconnected' is frequently transient (a brief Wi-Fi/cellular
+        // handoff, a slow ICE re-check) and often self-heals back to
+        // 'connected' within a few seconds — hanging up on the very
+        // first tick of it is why a call could look like it "cut
+        // instantly" right after being answered. Give it a real grace
+        // window before treating it as a genuine drop.
+        _reconnectGraceTimer ??= Timer(const Duration(seconds: 8), () {
+          if (!state.isIdle) unawaited(endCall());
+        });
+        break;
+      case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
+        // 'failed' is terminal per the WebRTC spec — ICE could not find
+        // any working path at all. If this fires right after answering,
+        // check that `.env`'s TURN_URL/TURN_USERNAME/TURN_CREDENTIAL are
+        // real values (see WebrtcConfig's doc comment and PRD.md §11's
+        // honest limitation note) — STUN-only ICE frequently can't
+        // traverse mobile-carrier NATs, and no app-side retry logic
+        // fixes a missing/misconfigured TURN server.
+        unawaited(endCall());
+        break;
+      default:
+        break;
+    }
+  }
+
+  /// Starts/stops the ring/dial tone purely off the current phase — the
+  /// tone plays from the moment a call starts dialing/ringing until it
+  /// becomes active (or ends/is declined/cancelled).
+  void _syncSound() {
+    const ringingPhases = {
+      CallPhase.outgoingRinging,
+      CallPhase.incomingRinging,
+      CallPhase.connecting,
+    };
+    if (ringingPhases.contains(state.phase)) {
+      unawaited(_sound.start());
+    } else {
+      unawaited(_sound.stop());
     }
   }
 
@@ -293,12 +445,19 @@ class CallController extends Notifier<CallSessionState> {
     await _answerSub?.cancel();
     await _iceSub?.cancel();
     await _hangupSub?.cancel();
+    await _ringingAckSub?.cancel();
     _offerSub = null;
     _answerSub = null;
     _iceSub = null;
     _hangupSub = null;
+    _ringingAckSub = null;
     _pendingOffer = null;
     _watchedIncomingCallId = null;
+    _ringingAckResendTimer?.cancel();
+    _ringingAckResendTimer = null;
+    _reconnectGraceTimer?.cancel();
+    _reconnectGraceTimer = null;
+    unawaited(_sound.stop());
 
     // flutter_webrtc's native teardown (RTCPeerConnection.close/dispose,
     // track.stop()) and the signaling channel's removeChannel call are

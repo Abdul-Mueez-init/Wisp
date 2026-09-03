@@ -9,6 +9,14 @@ import '../../../config/webrtc_config.dart';
 /// AiConfig's "shared wrapper, nothing outside touches the SDK
 /// directly" discipline, just applied to `flutter_webrtc` instead of
 /// Gemini/Groq.
+///
+/// Bugfix/feature session: `init()` used to do local-media grab AND
+/// peer-connection setup in one shot. Split into [initLocalMedia] +
+/// [initPeerConnection] (still both callable via [init] for the caller
+/// side, unchanged) so the callee can grab the camera/mic — and show a
+/// live preview — the instant an incoming video call rings, before they
+/// even tap Accept, matching WhatsApp. `init()` remains for the caller
+/// side, which already wants both steps back-to-back.
 class WebrtcSession {
   RTCPeerConnection? _pc;
   MediaStream? localStream;
@@ -19,8 +27,19 @@ class WebrtcSession {
 
   bool _isMuted = false;
   bool _isCameraOff = false;
+  bool _isSpeakerOn = false;
+  bool _localRendererInitialized = false;
+  bool _remoteRendererInitialized = false;
+
   bool get isMuted => _isMuted;
   bool get isCameraOff => _isCameraOff;
+  bool get isSpeakerOn => _isSpeakerOn;
+
+  /// True once [initLocalMedia] has grabbed the mic/camera — lets
+  /// CallController tell "already have a preview session running" apart
+  /// from "need to start from scratch".
+  bool get hasLocalMedia => localStream != null;
+  bool get hasPeerConnection => _pc != null;
 
   final List<RTCIceCandidate> _pendingRemoteCandidates = [];
   bool _remoteDescriptionSet = false;
@@ -28,12 +47,16 @@ class WebrtcSession {
   void Function(RTCIceCandidate candidate)? onLocalIceCandidate;
   void Function(RTCPeerConnectionState state)? onConnectionStateChanged;
 
-  /// Requests mic (+ camera if [isVideo]), opens the peer connection,
-  /// and wires local track/candidate callbacks. Must be called before
-  /// createOffer/createAnswer.
-  Future<void> init({required bool isVideo}) async {
-    await localRenderer.initialize();
-    await remoteRenderer.initialize();
+  /// Step 1 of 2: grabs the mic (+ camera if [isVideo]) and starts the
+  /// local preview renderer — no peer connection yet. Safe to call more
+  /// than once; a second call is a no-op if media was already grabbed,
+  /// so CallController doesn't need to track that itself.
+  Future<void> initLocalMedia({required bool isVideo}) async {
+    if (localStream != null) return;
+    if (!_localRendererInitialized) {
+      await localRenderer.initialize();
+      _localRendererInitialized = true;
+    }
 
     localStream = await navigator.mediaDevices.getUserMedia({
       'audio': true,
@@ -41,9 +64,26 @@ class WebrtcSession {
     });
     localRenderer.srcObject = localStream;
 
+    // WhatsApp-style default: video calls start on speakerphone (you're
+    // holding the phone away from your ear to look at the screen);
+    // audio calls start on the earpiece like an ordinary phone call.
+    await setSpeaker(isVideo);
+  }
+
+  /// Step 2 of 2: opens the actual `RTCPeerConnection` and attaches
+  /// whatever local tracks [initLocalMedia] already grabbed. Safe to
+  /// call even if a peer connection already exists (no-op).
+  Future<void> initPeerConnection() async {
+    if (_pc != null) return;
+    if (!_remoteRendererInitialized) {
+      await remoteRenderer.initialize();
+      _remoteRendererInitialized = true;
+    }
+
     _pc = await createPeerConnection(WebrtcConfig.rtcConfiguration);
 
-    for (final track in localStream!.getTracks()) {
+    for (final track
+        in localStream?.getTracks() ?? const <MediaStreamTrack>[]) {
       await _pc!.addTrack(track, localStream!);
     }
 
@@ -60,6 +100,14 @@ class WebrtcSession {
     };
 
     _pc!.onConnectionState = (state) => onConnectionStateChanged?.call(state);
+  }
+
+  /// Convenience for the caller side: grabs local media and opens the
+  /// peer connection back-to-back. Unchanged call sites keep working
+  /// exactly as before.
+  Future<void> init({required bool isVideo}) async {
+    await initLocalMedia(isVideo: isVideo);
+    await initPeerConnection();
   }
 
   Future<Map<String, dynamic>> createOffer() async {
@@ -135,9 +183,25 @@ class WebrtcSession {
     }
   }
 
+  /// Ear-speaker <-> phone-speaker toggle. Best-effort: some
+  /// platforms/devices reject the switch, and an audio-routing toggle
+  /// must never be allowed to fail the call itself.
+  Future<void> setSpeaker(bool on) async {
+    _isSpeakerOn = on;
+    try {
+      await Helper.setSpeakerphoneOn(on);
+    } catch (_) {}
+  }
+
+  Future<void> toggleSpeaker() => setSpeaker(!_isSpeakerOn);
+
   Future<void> dispose() async {
-    await localRenderer.dispose();
-    await remoteRenderer.dispose();
+    try {
+      await localRenderer.dispose();
+    } catch (_) {}
+    try {
+      await remoteRenderer.dispose();
+    } catch (_) {}
     for (final t in localStream?.getTracks() ?? <MediaStreamTrack>[]) {
       await t.stop();
     }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 
 /// The looping "beep… beep…" tone played from the moment a call starts
@@ -14,6 +15,21 @@ import 'package:just_audio/just_audio.dart';
 /// off `CallPhase` transitions — matches the "one small wrapper, nothing
 /// else touches the underlying player directly" discipline used
 /// elsewhere (AiConfig, WebrtcConfig).
+///
+/// Bugfix (reported: "can't hear the beep sound mid call"): the caller
+/// grabs the microphone (`getUserMedia`, in `WebrtcSession.initLocalMedia`)
+/// within a fraction of a second of `outgoingRinging` starting this
+/// tone. On Android, grabbing the mic for WebRTC switches the whole
+/// app into `MODE_IN_COMMUNICATION` and requests audio focus for voice
+/// communication — a plain `just_audio` player defaults to a MUSIC-type
+/// audio session, which loses/gets ducked by that focus request almost
+/// immediately, so the dial tone went effectively silent for nearly the
+/// entire ringing period. `AndroidAudioUsage.voiceCommunicationSignalling`
+/// is the Android platform's own purpose-built usage type for exactly
+/// this case ("sounds associated with the operation of voice
+/// communication signalling, such as a dial tone or a busy signal") —
+/// tagging this player with it keeps it audible alongside an active
+/// WebRTC voice session instead of competing with it for focus.
 class CallSoundPlayer {
   CallSoundPlayer() : _player = AudioPlayer();
 
@@ -53,6 +69,13 @@ class CallSoundPlayer {
 
   Future<void> _ensureReady() async {
     if (_ready) return;
+    // Must be set before the first play() — this is what keeps the
+    // tone audible once WebRTC grabs the mic and switches Android into
+    // voice-communication audio focus (see class doc comment above).
+    await _player.setAndroidAudioAttributes(const AndroidAudioAttributes(
+      usage: AndroidAudioUsage.voiceCommunicationSignalling,
+      contentType: AndroidAudioContentType.sonification,
+    ));
     final bytes = _buildToneWav();
     await _player.setAudioSource(_InMemoryWavSource(bytes));
     await _player.setLoopMode(LoopMode.all);

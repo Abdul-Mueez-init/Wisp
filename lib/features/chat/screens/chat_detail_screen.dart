@@ -66,9 +66,33 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   // synced, exactly as before.
   String? _lastSyncedMessageId;
 
+  // WISP_STABILITY_AND_STORY_VIEWERS_HANDOFF.md Part A permanent fix:
+  // `ref` is invalid inside `dispose()` itself — the old `dispose()`
+  // below called `ref.read(...)` directly, which is exactly what
+  // produced "Bad state: Cannot use \"ref\" after the widget was
+  // disposed" on every single chat exit (this screen is disposed on
+  // one of the most common navigation actions in the whole app).
+  // `TypingController`/`LiveLocationController` (obtained via
+  // `.notifier`) are stable plain Dart objects for the *provider's*
+  // lifetime, not the widget's — caching them once in `initState()`
+  // (while `ref` is still valid) and calling methods on the cached
+  // instance later is safe and touches `ref` at zero point.
+  TypingController? _typingController;
+  LiveLocationController? _liveLocationController;
+
+  // The live-location-stop check needs the *current* sharing state at
+  // the moment of leaving the chat, which isn't safe to cache once in
+  // `initState()` (the user can start/stop live-location sharing at any
+  // point while the chat stays open). `build()` already watches this
+  // provider on every rebuild — mirroring that value here gives
+  // `deactivate()` a ref-free, always-current snapshot to read.
+  LiveLocationSharingState? _lastLiveLocationState;
+
   @override
   void initState() {
     super.initState();
+    _typingController = ref.read(typingControllerProvider.notifier);
+    _liveLocationController = ref.read(liveLocationControllerProvider.notifier);
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncReadReceipts());
   }
 
@@ -94,15 +118,30 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   }
 
   @override
-  void dispose() {
-    ref
-        .read(typingControllerProvider.notifier)
-        .stopTyping(widget.conversationId);
-    final liveState = ref.read(liveLocationControllerProvider);
-    if (liveState.isActive &&
+  void deactivate() {
+    // `deactivate()` runs earlier in Flutter's teardown sequence than
+    // `dispose()` — `ref` is still valid here, so this is the correct
+    // place for anything that needs *current* provider state at
+    // teardown time (Riverpod's documented "dispose() is too late"
+    // rule). Reinsertion within the same frame is a rare edge case not
+    // worth special-casing: nothing in Wisp's navigation graph moves
+    // `ChatDetailScreen` to another parent without disposing it.
+    final liveState = _lastLiveLocationState;
+    if (liveState != null &&
+        liveState.isActive &&
         liveState.conversationId == widget.conversationId) {
-      ref.read(liveLocationControllerProvider.notifier).stop();
+      _liveLocationController?.stop();
     }
+    super.deactivate();
+  }
+
+  @override
+  void dispose() {
+    // Cached notifier reference only — zero `ref` access here. This
+    // used to call `ref.read(typingControllerProvider.notifier)`
+    // directly, which is exactly what produced "Cannot use \"ref\"
+    // after the widget was disposed" on every chat exit.
+    _typingController?.stopTyping(widget.conversationId);
     super.dispose();
   }
 
@@ -118,6 +157,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final sending = ref.watch(sendMessageControllerProvider).isLoading;
 
     final liveLocationState = ref.watch(liveLocationControllerProvider);
+    // Part A fix: mirrored into a field on every build() so
+    // deactivate() has a ref-free, always-current snapshot to check
+    // against at teardown time — see deactivate()'s doc comment.
+    _lastLiveLocationState = liveLocationState;
     final sharingLiveHere = liveLocationState.isActive &&
         liveLocationState.conversationId == widget.conversationId;
     final uploadingMedia =

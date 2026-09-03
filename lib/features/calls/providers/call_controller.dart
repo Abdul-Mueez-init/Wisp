@@ -171,7 +171,27 @@ class CallController extends Notifier<CallSessionState> {
     _signaling = signaling;
     _wireSignalingListeners(signaling);
     _offerSub ??= signaling.onOffer.listen((offer) => _pendingOffer = offer);
-    await signaling.join();
+
+    // Defensive fix: this used to be an unguarded `await signaling.join()`
+    // — if the signaling channel itself failed to subscribe (a Realtime
+    // `channelError`, same general instability class as the `calls`
+    // stream's `timedOut` failures fixed in
+    // `resilient_realtime_stream.dart`), the exception propagated
+    // uncaught out of this `ref.listen` callback (it's fired
+    // fire-and-forget, not awaited by the framework) and could leave the
+    // incoming-call screen stuck showing "Incoming call" with a signaling
+    // channel that will never deliver the offer or accept an answer.
+    // Now: a join failure ends the call locally right away with a clear
+    // error, instead of silently hanging.
+    try {
+      await signaling.join();
+    } catch (e) {
+      state = state.copyWith(
+        errorMessage: 'Could not connect to the caller: $e',
+      );
+      await _endLocally();
+      return;
+    }
 
     // Tell the caller we're actually ringing (app running, device
     // online) — this is what flips their screen from "Calling…" to

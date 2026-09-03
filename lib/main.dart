@@ -74,6 +74,11 @@ class _WispBootstrapState extends State<_WispBootstrap> {
       turnUsername: dotenv.env['TURN_USERNAME'] ?? '',
       turnCredential: dotenv.env['TURN_CREDENTIAL'] ?? '',
     );
+    // Bugfix (reported: "can't hear the beep sound mid call") — sets up
+    // the shared AudioSession once at boot so CallSoundPlayer's ring/
+    // dial tone survives WebRTC grabbing the mic later. See
+    // WebrtcConfig.configureAudioSession's doc comment.
+    await WebrtcConfig.configureAudioSession();
   }
 
   void _retry() {
@@ -243,16 +248,30 @@ class _PresenceLifecycleState extends ConsumerState<_PresenceLifecycle>
     with WidgetsBindingObserver {
   bool _wasAuthenticated = false;
 
+  // WISP_STABILITY_AND_STORY_VIEWERS_HANDOFF.md Part A permanent fix:
+  // `ref` becomes invalid at the point this widget's `dispose()` runs —
+  // calling `ref.read()`/`ref.watch()` *inside* `dispose()` itself is a
+  // documented Riverpod anti-pattern that either throws visibly ("Bad
+  // state: Cannot use \"ref\" after the widget was disposed") or
+  // silently no-ops depending on Flutter's element-unmount timing.
+  // `presenceControllerProvider` is a plain (non-family, non-autoDispose)
+  // `Provider`, so the same `PresenceController` instance is returned
+  // every time it's read — caching it once in a field, while `ref` is
+  // still valid, and calling methods on that cached plain Dart object
+  // inside `dispose()` is the correct, `ref`-free fix.
+  PresenceController? _presenceController;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _presenceController = ref.read(presenceControllerProvider);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    ref.read(presenceControllerProvider).goOffline();
+    _presenceController?.goOffline();
     super.dispose();
   }
 

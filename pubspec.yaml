@@ -23,7 +23,7 @@ dependencies:
   flutter_dotenv: ^5.1.0
  
   # pubspec.yaml — dependencies section, updated:
-
+ 
   # AI (Gemini + Groq — no official SDK for either anymore; both fully
   # REST via http. google_generative_ai was removed here — see
   # ai_config.dart's doc comment: it's deprecated/archived upstream in
@@ -32,7 +32,7 @@ dependencies:
   http: ^1.6.0
  
   cupertino_icons: ^1.0.8
-
+ 
   flutter_image_compress: ^2.3.0  # NEW — Phase 2 (wisp_fixes_handoff.md item 1):
                              # client-side WebP re-encode before chat-media image
                              # uploads. Zero-cost/on-device, no server component —
@@ -67,6 +67,16 @@ dependencies:
                               # (hasPermission/start/stop/onAmplitudeChanged/dispose) is
                               # unchanged from 5.x.
   just_audio: ^0.9.42       # NEW — Batch 5c: voice note playback
+  audio_session: ^0.1.25    # NEW — Phase 10 calling bugfix: promoted from a
+                              # transitive (just_audio) dependency to a direct
+                              # one because CallSoundPlayer/WebrtcConfig now
+                              # import it directly to configure the shared
+                              # AudioSession/AndroidAudioAttributes so the
+                              # ring/dial tone survives WebRTC's audio-focus
+                              # grab instead of going silent (see
+                              # call_sound_player.dart's doc comment). Version
+                              # pinned to what was already resolved in
+                              # pubspec.lock — no resolution change.
   geolocator: ^14.0.2
   flutter_map: ^8.3.1
   latlong2: ^0.10.1

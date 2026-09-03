@@ -1,3 +1,5 @@
+import 'package:audio_session/audio_session.dart';
+
 /// Shared WebRTC config per architecture.md's "one shared config class,
 /// nothing calls the SDK directly" shape (same pattern as `AiConfig` /
 /// `SupabaseConfig`). Feature code (features/calls/) reads
@@ -33,6 +35,37 @@ class WebrtcConfig {
     _turnUsername = turnUsername.trim();
     _turnCredential = turnCredential.trim();
     _initialized = true;
+  }
+
+  /// Bugfix (reported: "can't hear the beep sound mid call"): configures
+  /// the app's single shared `AudioSession` once, at startup, to a
+  /// `playAndRecord`/voice-chat category compatible with both an active
+  /// WebRTC call AND the `just_audio`-based ring/dial tone
+  /// (`CallSoundPlayer`) — without this, the two negotiate for audio
+  /// focus independently and the platform silences/ducks whichever one
+  /// asked second (see `CallSoundPlayer`'s doc comment for the
+  /// Android-specific half of this fix). Safe/cheap to call once at app
+  /// boot even on sessions that never place a call.
+  static Future<void> configureAudioSession() async {
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration(
+      avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+      avAudioSessionCategoryOptions:
+          AVAudioSessionCategoryOptions.allowBluetooth |
+              AVAudioSessionCategoryOptions.defaultToSpeaker |
+              AVAudioSessionCategoryOptions.mixWithOthers,
+      avAudioSessionMode: AVAudioSessionMode.voiceChat,
+      avAudioSessionRouteSharingPolicy:
+          AVAudioSessionRouteSharingPolicy.defaultPolicy,
+      avAudioSessionSetActiveOptions:
+          AVAudioSessionSetActiveOptions.notifyOthersOnDeactivation,
+      androidAudioAttributes: AndroidAudioAttributes(
+        contentType: AndroidAudioContentType.speech,
+        usage: AndroidAudioUsage.voiceCommunication,
+      ),
+      androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+      androidWillPauseWhenDucked: false,
+    ));
   }
 
   static void _assertInitialized() {

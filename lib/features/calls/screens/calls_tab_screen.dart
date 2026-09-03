@@ -24,16 +24,17 @@ import '../providers/call_provider.dart';
 /// the other member of the call's (always-direct, PRD.md §11) 1-on-1
 /// conversation — via [otherDirectMemberProvider] — regardless of
 /// which side placed the call.
-/// Phase 2 fix (wisp_fixes_handoff.md, Finding B): `myVisibleCallsStreamProvider`
-/// can legitimately emit one error event right after cold launch, while the
-/// Realtime socket is still finishing its auth handshake — the underlying
-/// stream keeps running and recovers on its own once auth completes (this
-/// was never an RLS problem). The screen used to render that transient error
-/// verbatim on first paint. Now a `ConsumerStatefulWidget` so it can track
-/// "how long has this screen been mounted" and treat any error within the
-/// first [_errorGracePeriod] as still-loading, scheduling one rebuild for
-/// when the grace period elapses in case the error is still live by then. A
-/// real, persistent failure (offline, actual backend issue, etc.) still
+/// Phase 2 fix (wisp_fixes_handoff.md, Finding B):
+/// `myVisibleCallsStreamProvider` can legitimately emit one error event
+/// right after cold launch, while the Realtime socket is still finishing
+/// its auth handshake — the underlying stream keeps running and recovers
+/// on its own once auth completes (this was never an RLS problem). The
+/// screen used to render that transient error verbatim on first paint.
+/// Now a `ConsumerStatefulWidget` so it can track "how long has this
+/// screen been mounted" and treat any error within the first
+/// [_errorGracePeriod] as still-loading, scheduling one rebuild for
+/// when the grace period elapses in case the error is still live by then.
+/// A real, persistent failure (offline, actual backend issue, etc.) still
 /// surfaces normally once that window passes.
 class CallsTabScreen extends ConsumerStatefulWidget {
   const CallsTabScreen({super.key});
@@ -219,15 +220,15 @@ class _CallHistoryTile extends ConsumerWidget {
     WidgetRef ref,
     Profile otherProfile,
   ) async {
+    if (!ref.read(callControllerProvider).isIdle) return;
+    context.push('/call');
     final controller = ref.read(callControllerProvider.notifier);
     final ok = await controller.startCall(
       conversationId: call.conversationId,
       calleeId: otherProfile.id,
       isVideo: call.isVideo,
     );
-    if (ok && context.mounted) {
-      context.push('/call');
-    } else if (!ok && context.mounted) {
+    if (!ok && context.mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Could not start the call.'),

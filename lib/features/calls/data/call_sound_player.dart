@@ -21,6 +21,34 @@ class CallSoundPlayer {
   bool _ready = false;
   bool _playing = false;
 
+  /// The last state actually requested (by CallController's phase
+  /// changes), independent of how far the in-flight operation has
+  /// gotten. `_run` checks this before its final `.play()`/pause so a
+  /// start() immediately followed by a stop() (or vice versa) always
+  /// resolves to what was most recently asked for — never to whichever
+  /// async call happened to finish last.
+  bool _desiredPlaying = false;
+
+  /// Bugfix: start()/stop() used to each fire their own independent
+  /// async chain (`_ensureReady` → `seek` → `play`, or `pause` →
+  /// `seek`). If a stop() landed while a start() from moments earlier
+  /// was still mid-flight (e.g. a call connects fast, so
+  /// connecting→active fires right after outgoingRinging→connecting),
+  /// the two could finish out of order: stop() would run first (pausing
+  /// nothing yet), then start()'s delayed `.play()` would fire *after*
+  /// it — leaving the tone audibly playing during a live call, with
+  /// `_playing` already (wrongly) reset to false so no later stop()
+  /// call would ever touch it again. Every start()/stop() request is
+  /// now funneled through this single FIFO queue so they always run in
+  /// the order requested, never overlapping.
+  Future<void> _queue = Future.value();
+
+  Future<void> _enqueue(Future<void> Function() op) {
+    final result = _queue.then((_) => op());
+    _queue = result.catchError((_) {});
+    return result;
+  }
+
   static const _sampleRate = 44100;
 
   Future<void> _ensureReady() async {
@@ -31,29 +59,49 @@ class CallSoundPlayer {
     _ready = true;
   }
 
-  /// Starts the looping tone if it isn't already playing. Safe to call
-  /// repeatedly (CallController calls this on every phase change while
-  /// still ringing/connecting) — a no-op if already playing.
-  Future<void> start() async {
-    if (_playing) return;
-    try {
-      await _ensureReady();
-      _playing = true;
-      await _player.seek(Duration.zero);
-      await _player.play();
-    } catch (_) {
-      // Best-effort — a missing audio output device or plugin hiccup
-      // must never block the actual call from proceeding.
-      _playing = false;
-    }
+  /// Requests the looping tone start. Safe to call repeatedly
+  /// (CallController calls this on every phase change while still
+  /// ringing/connecting) — queued and de-duped against any pending
+  /// stop().
+  Future<void> start() {
+    _desiredPlaying = true;
+    return _enqueue(() async {
+      // A stop() was queued after this start() before we even got to
+      // run — honor the newer request, don't start at all.
+      if (!_desiredPlaying) return;
+      if (_playing) return;
+      try {
+        await _ensureReady();
+        if (!_desiredPlaying) return;
+        await _player.seek(Duration.zero);
+        if (!_desiredPlaying) {
+          await _safePause();
+          return;
+        }
+        _playing = true;
+        await _player.play();
+      } catch (_) {
+        // Best-effort — a missing audio output device or plugin hiccup
+        // must never block the actual call from proceeding.
+        _playing = false;
+      }
+    });
   }
 
-  /// Stops and rewinds — called the instant a call becomes active, ends,
-  /// or is declined/cancelled, so the tone never bleeds into a live
-  /// call.
-  Future<void> stop() async {
-    if (!_playing) return;
-    _playing = false;
+  /// Requests the tone stop and rewind — called the instant a call
+  /// becomes active, ends, or is declined/cancelled, so the tone never
+  /// bleeds into a live call. Queued and de-duped against any pending
+  /// start().
+  Future<void> stop() {
+    _desiredPlaying = false;
+    return _enqueue(() async {
+      if (!_playing) return;
+      _playing = false;
+      await _safePause();
+    });
+  }
+
+  Future<void> _safePause() async {
     try {
       await _player.pause();
       await _player.seek(Duration.zero);
@@ -61,6 +109,7 @@ class CallSoundPlayer {
   }
 
   Future<void> dispose() async {
+    _desiredPlaying = false;
     _playing = false;
     try {
       await _player.dispose();

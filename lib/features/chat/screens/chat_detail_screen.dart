@@ -159,8 +159,8 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     // Perf fix (WISP_PERFORMANCE_HANDOFF.md §10) — reads from the
     // centralized `presenceByIdProvider` map (one app-wide realtime
     // source) instead of opening a dedicated per-user stream for this
-    // screen. Same fallback behavior as before: until presence data
-    // is available for this user, falls back to the static
+    // screen. Same fallback behavior as before: until presence data is
+    // available for this user, falls back to the static
     // `displayProfile` passed in via navigation.
     final centralPresence = (!isGroup && displayProfile != null)
         ? ref.watch(presenceByIdProvider.select((m) => m[displayProfile.id]))
@@ -511,15 +511,15 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   /// this device (returns false, state untouched) — that failure and a
   /// genuine start failure look the same here, both just don't push.
   Future<void> _startCall(Profile otherProfile, {required bool isVideo}) async {
+    if (!ref.read(callControllerProvider).isIdle) return;
+    context.push('/call');
     final controller = ref.read(callControllerProvider.notifier);
     final ok = await controller.startCall(
       conversationId: widget.conversationId,
       calleeId: otherProfile.id,
       isVideo: isVideo,
     );
-    if (ok && mounted) {
-      context.push('/call');
-    } else if (!ok && mounted) {
+    if (!ok && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Could not start the call.'),

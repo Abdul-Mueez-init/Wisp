@@ -245,14 +245,27 @@ class CallController extends Notifier<CallSessionState> {
       final answer = await session.createAnswer(offer);
       await signaling.sendAnswer(answer);
 
-      await ref
-          .read(callRepositoryProvider)
-          .updateStatus(callId: call.id, status: 'ongoing');
+      // Bugfix: as soon as our answer is sent, the handshake is done on
+      // our side and media can flow — flip to `active` immediately.
+      // The `calls` history write below is bookkeeping and must never
+      // be able to hang up a call that has already been answered (this
+      // was the actual cause of "call cuts the instant I hit Answer" —
+      // both writes lived in the same unprotected try block before,
+      // so any DB hiccup after a perfectly good handshake still ended
+      // the call via the catch block further down).
       state = state.copyWith(
         phase: CallPhase.active,
         callConnectedAt: DateTime.now(),
       );
       _syncSound();
+      try {
+        await ref
+            .read(callRepositoryProvider)
+            .updateStatus(callId: call.id, status: 'ongoing');
+      } catch (_) {
+        // Best-effort — see the identical comment on the caller-side
+        // onAnswer handler above.
+      }
       return true;
     } catch (e) {
       state = state.copyWith(errorMessage: 'Could not answer the call: $e');
@@ -365,15 +378,33 @@ class CallController extends Notifier<CallSessionState> {
       final session = _session;
       final call = state.call;
       if (session == null || call == null) return;
+      // The only thing that actually matters for the call to work is
+      // setRemoteDescription — that's what completes the WebRTC
+      // handshake and lets media flow. Flip to `active` on THIS device
+      // the instant that succeeds, regardless of what happens next.
       await session.setRemoteDescription(answer);
-      await ref
-          .read(callRepositoryProvider)
-          .updateStatus(callId: call.id, status: 'ongoing');
       state = state.copyWith(
         phase: CallPhase.active,
         callConnectedAt: DateTime.now(),
       );
       _syncSound();
+      // Bugfix: writing the shared `calls` history row to 'ongoing' is
+      // bookkeeping, not part of the handshake — it must never be able
+      // to tear down a call that has already connected. This used to
+      // sit inside the same unprotected block above, so any hiccup on
+      // this single DB write (RLS timing, a token refresh mid-call, a
+      // dropped packet) threw, and nothing here caught it — an
+      // uncaught error inside a stream listener, with the call already
+      // live. Best-effort now, matching endCall()/declineCall()'s
+      // existing pattern elsewhere in this file.
+      try {
+        await ref
+            .read(callRepositoryProvider)
+            .updateStatus(callId: call.id, status: 'ongoing');
+      } catch (_) {
+        // Call history row may be briefly stale — the live call itself
+        // is unaffected.
+      }
     });
 
     _iceSub = signaling.onIceCandidate.listen((candidate) {
@@ -410,14 +441,23 @@ class CallController extends Notifier<CallSessionState> {
         });
         break;
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
-        // 'failed' is terminal per the WebRTC spec — ICE could not find
-        // any working path at all. If this fires right after answering,
-        // check that `.env`'s TURN_URL/TURN_USERNAME/TURN_CREDENTIAL are
-        // real values (see WebrtcConfig's doc comment and PRD.md §11's
-        // honest limitation note) — STUN-only ICE frequently can't
-        // traverse mobile-carrier NATs, and no app-side retry logic
-        // fixes a missing/misconfigured TURN server.
-        unawaited(endCall());
+        // 'failed' means ICE could not find any working path — usually
+        // permanent, but flutter_webrtc can report a transient `failed`
+        // tick under real network jitter (same class of flakiness as
+        // `disconnected`) right before recovering, especially in the
+        // first second or two after negotiation. A short grace window
+        // avoids ending a call that's about to self-heal, while still
+        // ending quickly if it genuinely can't connect. If this keeps
+        // firing for real, check that `.env`'s TURN_URL/TURN_USERNAME/
+        // TURN_CREDENTIAL are real values (see WebrtcConfig's doc
+        // comment and PRD.md §11's honest limitation note) — STUN-only
+        // ICE frequently can't traverse mobile-carrier NATs at all, and
+        // no amount of app-side retry logic fixes a missing/
+        // misconfigured TURN server.
+        _reconnectGraceTimer?.cancel();
+        _reconnectGraceTimer = Timer(const Duration(seconds: 5), () {
+          if (!state.isIdle) unawaited(endCall());
+        });
         break;
       default:
         break;

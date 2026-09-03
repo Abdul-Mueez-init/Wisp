@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Wisp launch-screen fix (wisp_fixes.txt item 2) — single source for
+     the native launch screen's background color, kept in sync with
+     AppColors.backgroundBase (#0D3A35) in lib/core/theme/app_theme.dart
+     ("Level 0 (Base)" per design.md). The app forces ThemeMode.dark
+     unconditionally (see main.dart's WispApp), so this is intentionally
+     NOT duplicated/overridden under values-night — the launch screen
+     should always be dark, matching the app itself, regardless of the
+     OS's system theme setting. -->
+<resources>
+    <color name="launch_background_color">#0D3A35</color>
+</resources>

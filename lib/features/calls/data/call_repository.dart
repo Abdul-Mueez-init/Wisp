@@ -2,6 +2,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/errors/failure.dart';
+import '../../../core/utils/resilient_realtime_stream.dart';
 import '../../../models/call.dart';
 
 /// All `calls` table reads/writes go through here (rules.md Rule 8
@@ -77,19 +78,33 @@ class CallRepository {
   /// `MessageRepository.watchMyVisibleStatuses` — since `.stream()`
   /// doesn't support the multi-conversation `inFilter` the Calls tab
   /// would otherwise need. Callers sort/group client-side.
+  ///
+  /// wisp_fixes.txt permanent fix: wrapped in [resilientRealtimeStream]
+  /// so this channel resubscribes automatically after a token refresh
+  /// instead of staying stuck on a stale token post-background (see
+  /// that helper's doc comment for the full root cause). This is the
+  /// stream both the Calls tab and the global incoming-call detector
+  /// (`incomingRingingCallProvider`) depend on, so it's the one that
+  /// most needed to be self-healing.
   Stream<List<Call>> watchMyVisibleCalls() {
-    return _client.from('calls').stream(
-        primaryKey: ['id']).map((rows) => rows.map(Call.fromJson).toList());
+    return resilientRealtimeStream(
+      _client,
+      () => _client.from('calls').stream(
+          primaryKey: ['id']).map((rows) => rows.map(Call.fromJson).toList()),
+    );
   }
 
   /// Single-conversation call stream — used by ChatDetailScreen to
   /// detect an incoming/active call for the conversation it's
   /// currently showing (e.g. to render an "ongoing call" banner).
   Stream<List<Call>> watchCallsForConversation(String conversationId) {
-    return _client
-        .from('calls')
-        .stream(primaryKey: ['id'])
-        .eq('conversation_id', conversationId)
-        .map((rows) => rows.map(Call.fromJson).toList());
+    return resilientRealtimeStream(
+      _client,
+      () => _client
+          .from('calls')
+          .stream(primaryKey: ['id'])
+          .eq('conversation_id', conversationId)
+          .map((rows) => rows.map(Call.fromJson).toList()),
+    );
   }
 }

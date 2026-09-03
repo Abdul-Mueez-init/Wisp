@@ -167,19 +167,36 @@ class ChatListScreen extends ConsumerWidget {
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: openingAiChat ? null : () => _openAiChat(context, ref),
-        backgroundColor: AppColors.primaryContainer,
-        foregroundColor: AppColors.primary,
-        icon: openingAiChat
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                    strokeWidth: 2, color: AppColors.primary),
-              )
-            : const Icon(Icons.auto_awesome),
-        label: const Text('Ask Wisp AI'),
+      // BUGFIX (wisp_fixes.txt, "Ask Wisp AI button is hidden under the
+      // navbar"): AppShell's outer Scaffold runs `extendBody: true` so
+      // its floating glass pill paints over full-height content. This
+      // screen's OWN nested Scaffold has no bottomNavigationBar of its
+      // own, so Flutter's default FAB placement sits 16dp from the
+      // literal bottom of the screen — the same real estate the pill
+      // occupies — and the semi-transparent pill then paints over it.
+      // `kFloatingNavClearance` is the exact clearance every tab's
+      // scrollable content already reserves above the pill (see
+      // layout_constants.dart); adding a bit more on top of that
+      // (`kFabExtraLift`) is what actually gives the FAB a visible gap
+      // above the pill instead of just barely clearing its top edge.
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.only(
+          bottom: kFloatingNavClearance + kFabExtraLift,
+        ),
+        child: FloatingActionButton.extended(
+          onPressed: openingAiChat ? null : () => _openAiChat(context, ref),
+          backgroundColor: AppColors.primaryContainer,
+          foregroundColor: AppColors.primary,
+          icon: openingAiChat
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: AppColors.primary),
+                )
+              : const Icon(Icons.auto_awesome),
+          label: const Text('Ask Wisp AI'),
+        ),
       ),
     );
   }
@@ -420,20 +437,54 @@ class _UnreadBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // wisp_fixes.txt round 2 — matched to the WhatsApp reference
+    // screenshot ("make it identical with our app colours"): a solid,
+    // genuinely-circular badge with a bold, punchy fill, not a soft
+    // pill. Two changes from the first pass:
+    //
+    // 1. Fixed 22x22 box (not `minWidth`) so it's a true circle for
+    //    1-2 digits like the reference, only relaxing to a pill shape
+    //    once `count > 99` forces `'99+'` to not fit in a circle.
+    // 2. Swapped the fill from `primaryContainer` (design.md's
+    //    Buttons-section "Moderate Green", a darker/muted tone — read
+    //    fine but nowhere near as punchy as the reference's vivid
+    //    circle against a dark background) to `AppColors.primary`
+    //    (design.md Colors section: "The Accent: Moderate Green is
+    //    used surgically for... active states" — an unread count is
+    //    exactly that) paired with `AppColors.onPrimary`, the token
+    //    Material's own color system defines specifically as
+    //    text-on-primary, for real contrast. This is a deliberate,
+    //    flagged deviation from design.md's literal "Cream label-sm
+    //    text" wording for this one component: `primary` (#98D2BF) is
+    //    a light mint, and cream (#FBF6F0) text on it reads as barely
+    //    any contrast at all — `onPrimary` (#00382C) is what actually
+    //    reproduces the reference's crisp white-on-vivid-green look
+    //    using only existing tokens, no new color invented.
+    final isCircle = count <= 99;
     return Container(
-      constraints: const BoxConstraints(minWidth: 20),
-      height: 20,
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      decoration: BoxDecoration(
-        color: AppColors.primaryContainer,
-        borderRadius: BorderRadius.circular(AppRadius.full),
+      width: isCircle ? 22 : null,
+      height: 22,
+      constraints: isCircle ? null : const BoxConstraints(minWidth: 22),
+      padding: isCircle
+          ? EdgeInsets.zero
+          : const EdgeInsets.symmetric(horizontal: 7),
+      decoration: const BoxDecoration(
+        color: AppColors.primary,
+        // `circular(11)` on a fixed 22x22 box is mathematically a
+        // perfect circle (radius = half the side); on the wider
+        // `minWidth` box that only kicks in for 100+ unread (a pill,
+        // not a circle, at that point) it becomes a clean stadium
+        // shape — one line of code covers both, no BoxShape.circle
+        // ellipse-distortion risk on the non-square case.
+        borderRadius: BorderRadius.all(Radius.circular(11)),
       ),
       alignment: Alignment.center,
       child: Text(
         count > 99 ? '99+' : '$count',
         style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: AppColors.cream,
-              fontWeight: FontWeight.w500,
+              color: AppColors.onPrimary,
+              fontWeight: FontWeight.w700,
+              height: 1,
             ),
       ),
     );

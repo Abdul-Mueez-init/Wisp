@@ -16,3 +16,12 @@
 /// shared constant instead of a hardcoded number in each screen so the
 /// two stay in sync if the pill's own height/margins ever change.
 const double kFloatingNavClearance = 104.0;
+
+/// Extra lift added on top of [kFloatingNavClearance] for floating
+/// action buttons specifically (chat_list_screen.dart's "Ask Wisp AI"
+/// FAB) — `kFloatingNavClearance` alone only clears the *top edge* of
+/// the pill nav, which reads as sitting right on top of it. This adds
+/// a clear ~half-inch visual gap above the pill instead, per
+/// wisp_fixes.txt. 48.0 logical pixels ≈ 0.5in (Flutter's logical
+/// pixel is defined as 1/96in, matching CSS px).
+const double kFabExtraLift = 5.0;

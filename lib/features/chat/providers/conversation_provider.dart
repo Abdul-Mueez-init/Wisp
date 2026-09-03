@@ -169,10 +169,37 @@ final myConversationSummariesProvider =
       )
       .subscribe();
 
+  // BUGFIX (wisp_fixes.txt: unread badge "doesn't remove immediately,
+  // only after refresh") — `markRead()` (chat_detail_screen.dart's
+  // `_syncReadReceipts`) writes to `message_status`, not `messages`,
+  // so the two channels above never fired when a chat got read. Third
+  // channel, same pattern: any `message_status` row update for rows
+  // belonging to *this* user (the recipient whose read-state actually
+  // drives `ConversationSummary.unreadCount`) schedules the same
+  // debounced refetch. Filtered with `eq` on `user_id` — unlike the
+  // other two channels, `message_status_select_own`'s RLS shape is a
+  // single-column equality, so a server-side filter is both possible
+  // and cheaper than relying on RLS alone here.
+  final readReceiptsChannel = SupabaseConfig.client
+      .channel('chat-list-read-receipts-$myId')
+      .onPostgresChanges(
+        event: PostgresChangeEvent.update,
+        schema: 'public',
+        table: 'message_status',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'user_id',
+          value: myId,
+        ),
+        callback: (_) => scheduleRefresh(),
+      )
+      .subscribe();
+
   ref.onDispose(() {
     debounce?.cancel();
     SupabaseConfig.client.removeChannel(messagesChannel);
     SupabaseConfig.client.removeChannel(membersChannel);
+    SupabaseConfig.client.removeChannel(readReceiptsChannel);
     controller.close();
   });
 

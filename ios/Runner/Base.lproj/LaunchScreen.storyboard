@@ -19,7 +19,13 @@
                             <imageView opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="center" image="LaunchImage" translatesAutoresizingMaskIntoConstraints="NO" id="YRO-k0-Ey4">
                             </imageView>
                         </subviews>
-                        <color key="backgroundColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <!-- Wisp launch-screen fix (wisp_fixes.txt item 2) —
+                             was hardcoded white (1,1,1,1), the untouched
+                             Flutter template default. Matches
+                             AppColors.backgroundBase (#0D3A35) exactly so
+                             there's no color seam before the Flutter
+                             _SplashScreen takes over. -->
+                        <color key="backgroundColor" red="0.05098" green="0.22745" blue="0.20784" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                         <constraints>
                             <constraint firstItem="YRO-k0-Ey4" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="1a2-6s-vTC"/>
                             <constraint firstItem="YRO-k0-Ey4" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="4X2-HB-R7a"/>
@@ -32,6 +38,10 @@
         </scene>
     </scenes>
     <resources>
-        <image name="LaunchImage" width="168" height="185"/>
+        <!-- Wisp launch-screen fix: was the untouched Flutter template's
+             1x1 transparent placeholder metadata. LaunchImage.imageset now
+             holds the real logo (1x/2x/3x generated from
+             assets/images/logo.png); 180x180 matches the 1x asset. -->
+        <image name="LaunchImage" width="180" height="180"/>
     </resources>
 </document>

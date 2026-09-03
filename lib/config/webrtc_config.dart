@@ -48,7 +48,20 @@ class WebrtcConfig {
   /// boot even on sessions that never place a call.
   static Future<void> configureAudioSession() async {
     final session = await AudioSession.instance;
-    await session.configure(const AudioSessionConfiguration(
+    // Bugfix: this whole object used to be `const AudioSessionConfiguration(...)`.
+    // `AVAudioSessionCategoryOptions` overloads `|` as a normal *instance*
+    // method (see audio_session's darwin.dart), and Dart's constant
+    // evaluator only folds `|`/`&`/etc. for the built-in numeric/bool/
+    // String types — it can't evaluate a user-defined operator overload
+    // at compile time. `allowBluetooth | defaultToSpeaker | mixWithOthers`
+    // is therefore not a valid *constant* expression, which is exactly
+    // what the analyzer/compiler was rejecting on these two lines.
+    // Dropping `const` here (the constructor itself stays `const`-capable
+    // for callers who don't need this combined-flags case) makes the `|`
+    // calls happen at ordinary runtime instead, which is perfectly legal
+    // Dart — this object is only ever built once at app boot anyway, so
+    // there's no performance reason to insist on `const`.
+    await session.configure(AudioSessionConfiguration(
       avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
       avAudioSessionCategoryOptions:
           AVAudioSessionCategoryOptions.allowBluetooth |
@@ -93,8 +106,8 @@ class WebrtcConfig {
   }
 
   /// True once real TURN credentials are filled in — used only to
-  /// surface an honest "STUN-only, may not traverse strict NATs"
-  /// note in the UI if you want one; not required for calls to work.
+  /// surface an honest "STUN-only, may not traverse strict NATs" note
+  /// in the UI if you want one; not required for calls to work.
   static bool get hasTurnConfigured {
     _assertInitialized();
     return _turnUrl.isNotEmpty;

@@ -11,6 +11,7 @@ import '../../../models/story.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../profile/providers/profile_provider.dart';
 import '../providers/story_provider.dart';
+import '../widgets/story_viewer_row.dart';
 
 /// Arguments for the `/status/view` route. [groups] is the full set of
 /// author story-groups the viewer can swipe between — a single-item
@@ -233,6 +234,12 @@ class _StoryViewerScreenState extends ConsumerState<StoryViewerScreen>
     final story = _currentStory;
     final group = _currentGroup;
     final width = MediaQuery.of(context).size.width;
+    // Part C (story viewer list): only the story's own author ever sees
+    // the "who viewed this" pill — never on a story you're viewing that
+    // belongs to someone else. That symmetric case (them seeing that
+    // you viewed) is exactly what `recordView()` already, correctly,
+    // quietly handles with no UI on your side.
+    final isOwnStory = group.author.id == _myId;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -260,8 +267,24 @@ class _StoryViewerScreenState extends ConsumerState<StoryViewerScreen>
             fit: StackFit.expand,
             children: [
               Center(child: _buildMedia(story)),
-              if (story.caption?.isNotEmpty ?? false)
-                _buildCaptionOverlay(story),
+              // Combined bottom layer so the viewer-count pill and the
+              // caption gradient never overlap — pill sits just above
+              // the caption instead of both being independently pinned
+              // to the same bottom edge.
+              if (isOwnStory || (story.caption?.isNotEmpty ?? false))
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (isOwnStory) _buildViewersPill(story),
+                      if (story.caption?.isNotEmpty ?? false)
+                        _buildCaptionContent(story),
+                    ],
+                  ),
+                ),
               Positioned(
                 top: 8,
                 left: 8,
@@ -384,24 +407,200 @@ class _StoryViewerScreenState extends ConsumerState<StoryViewerScreen>
     );
   }
 
-  Widget _buildCaptionOverlay(Story story) {
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(
-            AppSpacing.pageMargin, 40, AppSpacing.pageMargin, 28),
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.transparent, Colors.black87],
-          ),
+  // Renamed from _buildCaptionOverlay: no longer wraps itself in its own
+  // `Positioned` — it's now one child inside the shared bottom `Column`
+  // in `build()` (alongside the viewers pill), so a `Positioned` here
+  // would be invalid (Positioned only works as a direct Stack child).
+  Widget _buildCaptionContent(Story story) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.pageMargin, 40, AppSpacing.pageMargin, 28),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Colors.transparent, Colors.black87],
         ),
-        child: Text(
-          story.caption!,
-          style: const TextStyle(color: AppColors.cream, fontSize: 15),
+      ),
+      child: Text(
+        story.caption!,
+        style: const TextStyle(color: AppColors.cream, fontSize: 15),
+      ),
+    );
+  }
+
+  /// Part C — the tappable "N views" pill shown only to the story's own
+  /// author. Wrapped in its own `Consumer` so watching
+  /// `storyViewersProvider` (for the live count) doesn't rebuild the
+  /// whole screen — just this small pill.
+  Widget _buildViewersPill(Story story) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Consumer(
+        builder: (context, ref, _) {
+          final viewersAsync = ref.watch(storyViewersProvider(story.id));
+          final count = viewersAsync.valueOrNull?.length;
+          return Center(
+            child: GestureDetector(
+              onTap: () => _openViewersSheet(story),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.35),
+                  borderRadius: BorderRadius.circular(AppRadius.full),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.remove_red_eye_outlined,
+                        color: AppColors.cream, size: 16),
+                    const SizedBox(width: 6),
+                    Text(
+                      count == null
+                          ? 'Viewers'
+                          : '$count ${count == 1 ? 'view' : 'views'}',
+                      style: const TextStyle(
+                        color: AppColors.cream,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Opens the "Viewed by" bottom sheet. Pauses the story's own
+  /// auto-advance timer/video first (same "don't let the story
+  /// auto-advance while the person is reading something on top of it"
+  /// behavior long-press already gives you) and resumes exactly where
+  /// it left off when the sheet closes.
+  void _openViewersSheet(Story story) {
+    _pause();
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surfaceContainer,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.xl)),
+      ),
+      builder: (sheetContext) => _StoryViewersSheet(storyId: story.id),
+    ).whenComplete(() {
+      if (mounted) _resume();
+    });
+  }
+}
+
+/// Bottom sheet body for the "Viewed by" list — most-recent-view-first,
+/// avatar + name + relative timestamp per row, loading/error/empty
+/// states. One-shot `FutureProvider.family` per `storyViewersProvider`'s
+/// doc comment — it's a snapshot, not a live-updating list.
+class _StoryViewersSheet extends ConsumerWidget {
+  const _StoryViewersSheet({required this.storyId});
+
+  final String storyId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final viewersAsync = ref.watch(storyViewersProvider(storyId));
+
+    return SafeArea(
+      top: false,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.6,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Container(
+              width: 36,
+              height: 4,
+              decoration: BoxDecoration(
+                color: AppColors.onSurfaceVariant.withOpacity(0.4),
+                borderRadius: BorderRadius.circular(AppRadius.full),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  AppSpacing.pageMargin, 16, AppSpacing.pageMargin, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.remove_red_eye_outlined,
+                      color: AppColors.cream, size: 18),
+                  const SizedBox(width: 8),
+                  Text(
+                    viewersAsync.valueOrNull == null
+                        ? 'Viewed by'
+                        : 'Viewed by ${viewersAsync.value!.length}',
+                    style: const TextStyle(
+                      color: AppColors.cream,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 15,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: AppColors.outlineVariant),
+            Flexible(
+              child: viewersAsync.when(
+                loading: () => const Padding(
+                  padding: EdgeInsets.all(32),
+                  child: Center(
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: AppColors.primary),
+                  ),
+                ),
+                error: (error, _) => Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        'Could not load viewers.',
+                        style: TextStyle(color: AppColors.onSurfaceVariant),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton(
+                        onPressed: () =>
+                            ref.invalidate(storyViewersProvider(storyId)),
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                ),
+                data: (viewers) {
+                  if (viewers.isEmpty) {
+                    return const Padding(
+                      padding: EdgeInsets.all(32),
+                      child: Center(
+                        child: Text(
+                          'No views yet',
+                          style: TextStyle(color: AppColors.onSurfaceVariant),
+                        ),
+                      ),
+                    );
+                  }
+                  return ListView.builder(
+                    shrinkWrap: true,
+                    padding: const EdgeInsets.only(bottom: 16, top: 8),
+                    itemCount: viewers.length,
+                    itemBuilder: (context, index) =>
+                        StoryViewerRow(viewer: viewers[index]),
+                  );
+                },
+              ),
+            ),
+          ],
         ),
       ),
     );

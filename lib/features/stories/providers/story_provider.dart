@@ -70,3 +70,15 @@ class PostStoryController extends AsyncNotifier<void> {
 
 final postStoryControllerProvider =
     AsyncNotifierProvider<PostStoryController, void>(PostStoryController.new);
+
+/// One-shot fetch per story — a viewer list doesn't need to be
+/// realtime-streamed (matches WhatsApp: opening the viewer list shows a
+/// snapshot, it doesn't live-update while you're looking at it), so a
+/// plain FutureProvider.family is the right shape per architecture.md's
+/// "one-off actions/reads → Notifier/AsyncNotifier or FutureProvider,
+/// only continuously-changing data → StreamProvider" split. Part C of
+/// the stability/story-viewers handoff doc.
+final storyViewersProvider =
+    FutureProvider.family<List<StoryViewer>, String>((ref, storyId) {
+  return ref.read(storyRepositoryProvider).fetchViewers(storyId);
+});

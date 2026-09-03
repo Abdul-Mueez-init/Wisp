@@ -67,3 +67,19 @@ class StoryGroup {
 
   Story get latest => stories.last;
 }
+
+/// One viewer of a story, for the story owner's "Viewed by" list
+/// (WISP_STABILITY_AND_STORY_VIEWERS_HANDOFF.md Part C). NOT an ERD.md
+/// table by itself — a client-side join of `story_views` + `profiles`,
+/// same "composite, not a schema entity" reasoning as [StoryGroup].
+class StoryViewer {
+  const StoryViewer({required this.profile, required this.viewedAt});
+
+  final Profile profile;
+  final DateTime viewedAt;
+
+  factory StoryViewer.fromJson(Map<String, dynamic> json) => StoryViewer(
+        profile: Profile.fromJson(json['profiles'] as Map<String, dynamic>),
+        viewedAt: DateTime.parse(json['viewed_at'] as String),
+      );
+}

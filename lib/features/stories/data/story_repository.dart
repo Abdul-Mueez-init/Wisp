@@ -166,6 +166,30 @@ class StoryRepository {
     }
   }
 
+  /// Every viewer of [storyId], most-recent view first — for the story
+  /// owner's "Viewed by" list (Part C of the stability/story-viewers
+  /// handoff doc). RLS (`story_views_select_owner_or_viewer`) already
+  /// restricts this to rows the caller is entitled to see: if the
+  /// caller isn't the story's owner, this simply returns their own view
+  /// row (if any) rather than throwing, matching the policy's shape —
+  /// callers should still only ever surface this UI for the owner (see
+  /// `story_viewer_screen.dart`'s `isOwnStory` check), this repository
+  /// method doesn't need to duplicate that check.
+  Future<List<StoryViewer>> fetchViewers(String storyId) async {
+    try {
+      final rows = await _client
+          .from('story_views')
+          .select('viewed_at, profiles!inner(*)')
+          .eq('story_id', storyId)
+          .order('viewed_at', ascending: false);
+      return (rows as List)
+          .map((r) => StoryViewer.fromJson(r as Map<String, dynamic>))
+          .toList();
+    } on PostgrestException catch (e) {
+      throw SupabaseFailure(e.message);
+    }
+  }
+
   String _sanitizeFileName(String name) {
     final base = name.split('/').last.split('\\').last;
     final cleaned = base.replaceAll(RegExp(r'[^\w.\-]'), '_');

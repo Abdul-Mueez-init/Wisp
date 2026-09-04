@@ -1,8 +1,10 @@
 // lib/features/voice_notes/widgets/voice_note_bubble.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 
+import '../../../config/webrtc_config.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../models/message.dart';
 import '../../chat/providers/message_provider.dart';
@@ -40,6 +42,16 @@ class _VoiceNoteBubbleState extends ConsumerState<VoiceNoteBubble> {
   bool _transcriptExpanded = false;
 
   @override
+  void initState() {
+    super.initState();
+    _player.setAndroidAudioAttributes(const AndroidAudioAttributes(
+      usage: AndroidAudioUsage.media,
+      contentType: AndroidAudioContentType.speech,
+    ));
+    _player.setVolume(1.0);
+  }
+
+  @override
   void dispose() {
     _player.dispose();
     super.dispose();
@@ -60,6 +72,7 @@ class _VoiceNoteBubbleState extends ConsumerState<VoiceNoteBubble> {
       await _player.pause();
       return;
     }
+    await WebrtcConfig.restoreDefaultAudioSession();
     if (state == ProcessingState.completed) await _player.seek(Duration.zero);
     await _player.play();
   }

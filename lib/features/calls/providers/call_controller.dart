@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCPeerConnectionState;
 
 import '../../../config/supabase_config.dart';
+import '../../../config/webrtc_config.dart';
 import '../../../models/call.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../data/call_sound_player.dart';
@@ -106,6 +107,7 @@ class CallController extends Notifier<CallSessionState> {
       otherUserId: calleeId,
       isVideo: isVideo,
     );
+    await WebrtcConfig.configureCallAudioSession();
     _syncSound();
 
     try {
@@ -183,6 +185,7 @@ class CallController extends Notifier<CallSessionState> {
       otherUserId: call.callerId,
       isVideo: call.isVideo,
     );
+    await WebrtcConfig.configureCallAudioSession();
     _syncSound();
 
     final signaling = SignalingRepository(SupabaseConfig.client, call.id);
@@ -304,9 +307,11 @@ class CallController extends Notifier<CallSessionState> {
       // both writes lived in the same unprotected try block before,
       // so any DB hiccup after a perfectly good handshake still ended
       // the call via the catch block further down).
+      await session.applyInCallAudioRouting(isVideo: state.isVideo);
       state = state.copyWith(
         phase: CallPhase.active,
         callConnectedAt: DateTime.now(),
+        isSpeakerOn: session.isSpeakerOn,
       );
       _syncSound();
       try {
@@ -441,9 +446,11 @@ class CallController extends Notifier<CallSessionState> {
       // handshake and lets media flow. Flip to `active` on THIS device
       // the instant that succeeds, regardless of what happens next.
       await session.setRemoteDescription(answer);
+      await session.applyInCallAudioRouting(isVideo: state.isVideo);
       state = state.copyWith(
         phase: CallPhase.active,
         callConnectedAt: DateTime.now(),
+        isSpeakerOn: session.isSpeakerOn,
       );
       _syncSound();
       try {
@@ -589,6 +596,8 @@ class CallController extends Notifier<CallSessionState> {
         await signaling.dispose().timeout(const Duration(seconds: 3));
       } catch (_) {}
     }
+
+    await WebrtcConfig.restoreDefaultAudioSession();
   }
 }
 

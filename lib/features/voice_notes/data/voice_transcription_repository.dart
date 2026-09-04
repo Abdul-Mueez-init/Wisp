@@ -99,17 +99,17 @@ class VoiceTranscriptionRepository {
       systemInstruction: _extractionSystemInstruction,
     );
     try {
-      final cleaned =
-          raw.trim().replaceAll(RegExp(r'^```json|```$'), '').trim();
-      final decoded = jsonDecode(cleaned) as Map<String, dynamic>;
+      final match = RegExp(r'\{[\s\S]*\}').firstMatch(raw);
+      if (match == null) return const [];
+      final decoded = jsonDecode(match.group(0)!) as Map<String, dynamic>;
       final rawActions = decoded['actions'] as List<dynamic>? ?? [];
       return rawActions
           .whereType<Map<String, dynamic>>()
           .where((a) => (a['title'] as String?)?.trim().isNotEmpty ?? false)
           .map(VoiceActionItem.fromJson)
           .toList();
-    } catch (e) {
-      throw AiFailure('Could not parse action-extraction response: $e');
+    } catch (_) {
+      return const [];
     }
   }
 }

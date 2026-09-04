@@ -74,11 +74,9 @@ class _WispBootstrapState extends State<_WispBootstrap> {
       turnUsername: dotenv.env['TURN_USERNAME'] ?? '',
       turnCredential: dotenv.env['TURN_CREDENTIAL'] ?? '',
     );
-    // Bugfix (reported: "can't hear the beep sound mid call") — sets up
-    // the shared AudioSession once at boot so CallSoundPlayer's ring/
-    // dial tone survives WebRTC grabbing the mic later. See
-    // WebrtcConfig.configureAudioSession's doc comment.
-    await WebrtcConfig.configureAudioSession();
+    // Initialize default media audio session so chat voice notes and other
+    // media play through loudspeakers, not the earpiece.
+    await WebrtcConfig.restoreDefaultAudioSession();
   }
 
   void _retry() {

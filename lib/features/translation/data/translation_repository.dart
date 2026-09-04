@@ -27,7 +27,7 @@ class TranslationRepository {
   const TranslationRepository();
 
   /// One combined call: detect the source language of [text], and
-  /// translate it to [targetLanguageCode] only if it isn't already in
+  /// translate it to [targetLanguageCode] if it isn't already in
   /// that language. Single JSON-only response so this is one Gemini/
   /// Groq round trip instead of two.
   Future<TranslationResult> detectAndTranslate({
@@ -37,10 +37,9 @@ class TranslationRepository {
     final systemInstruction =
         'You are a language detection and translation engine embedded '
         'in a chat app. You will be given a single chat message. Detect '
-        'its language as an ISO 639-1 code. If that code is exactly '
-        '"$targetLanguageCode", OR if that code is "en" (English source '
-        'text is never translated, regardless of the target language), '
-        'set "translation" to null. Otherwise, translate the message '
+        'its language as an ISO 639-1 code. If that code matches the target '
+        'language code "$targetLanguageCode", set "translation" to null '
+        '(no translation needed). Otherwise, translate the message '
         'into the language with ISO 639-1 code "$targetLanguageCode", '
         'preserving tone and any emoji, and put the result in '
         '"translation". '
@@ -54,25 +53,27 @@ class TranslationRepository {
     );
 
     try {
-      final cleaned =
-          raw.trim().replaceAll(RegExp(r'^```json|```$'), '').trim();
-      final decoded = jsonDecode(cleaned) as Map<String, dynamic>;
+      final match = RegExp(r'\{[\s\S]*\}').firstMatch(raw);
+      if (match == null) {
+        throw const AiFailure('No JSON found in translation response.');
+      }
+      final decoded = jsonDecode(match.group(0)!) as Map<String, dynamic>;
       final language = decoded['language'] as String?;
       final translation = decoded['translation'] as String?;
       if (language == null) {
         throw const AiFailure('Translation response missing "language".');
       }
-      // Belt-and-braces on top of the prompt instruction above: PRD.md
-      // §10 says English-source messages always display as-is, no
-      // exceptions — don't rely on the model alone to honor that.
-      final isEnglishSource = language.toLowerCase() == 'en';
+
+      final isSameLanguage =
+          language.toLowerCase() == targetLanguageCode.toLowerCase();
+      final hasValidTranslation =
+          translation != null && translation.trim().isNotEmpty;
+
       return TranslationResult(
         detectedLanguage: language,
-        translatedText: (isEnglishSource ||
-                translation == null ||
-                translation.trim().isEmpty)
+        translatedText: (isSameLanguage || !hasValidTranslation)
             ? null
-            : translation,
+            : translation.trim(),
       );
     } catch (e) {
       throw AiFailure('Could not parse translation response: $e');

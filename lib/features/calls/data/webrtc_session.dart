@@ -64,10 +64,10 @@ class WebrtcSession {
     });
     localRenderer.srcObject = localStream;
 
-    // WhatsApp-style default: video calls start on speakerphone (you're
-    // holding the phone away from your ear to look at the screen);
-    // audio calls start on the earpiece like an ordinary phone call.
-    await setSpeaker(isVideo);
+    // While dialing/ringing, keep speakerphone ON so dial/ringback tones
+    // and live preview audio are clearly audible over the speaker.
+    // Switching to earpiece for audio calls happens when entering active phase.
+    await setSpeaker(true);
   }
 
   /// Step 2 of 2: opens the actual `RTCPeerConnection` and attaches
@@ -214,7 +214,18 @@ class WebrtcSession {
 
   Future<void> toggleSpeaker() => setSpeaker(!_isSpeakerOn);
 
+  /// Applies the appropriate in-call audio routing once the call connects/is answered:
+  /// Video calls stay on the speakerphone; audio calls switch to earpiece mode.
+  Future<void> applyInCallAudioRouting({required bool isVideo}) async {
+    await setSpeaker(isVideo);
+  }
+
   Future<void> dispose() async {
+    // Always restore speakerphone to ON so subsequent media playback
+    // (such as chat voice notes) never gets trapped in earpiece mode.
+    try {
+      await setSpeaker(true);
+    } catch (_) {}
     try {
       await localRenderer.dispose();
     } catch (_) {}

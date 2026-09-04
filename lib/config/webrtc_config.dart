@@ -1,4 +1,5 @@
 import 'package:audio_session/audio_session.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 /// Shared WebRTC config per architecture.md's "one shared config class,
 /// nothing calls the SDK directly" shape (same pattern as `AiConfig` /
@@ -23,7 +24,7 @@ class WebrtcConfig {
   static late final String _turnCredential;
 
   static const _publicStunServer = {
-    'urls': 'stun:stun.l.google.com:19302',
+    'urls': ['stun:stun.l.google.com:19302'],
   };
 
   static void initialize({
@@ -37,49 +38,62 @@ class WebrtcConfig {
     _initialized = true;
   }
 
-  /// Bugfix (reported: "can't hear the beep sound mid call"): configures
-  /// the app's single shared `AudioSession` once, at startup, to a
-  /// `playAndRecord`/voice-chat category compatible with both an active
-  /// WebRTC call AND the `just_audio`-based ring/dial tone
-  /// (`CallSoundPlayer`) — without this, the two negotiate for audio
-  /// focus independently and the platform silences/ducks whichever one
-  /// asked second (see `CallSoundPlayer`'s doc comment for the
-  /// Android-specific half of this fix). Safe/cheap to call once at app
-  /// boot even on sessions that never place a call.
-  static Future<void> configureAudioSession() async {
-    final session = await AudioSession.instance;
-    // Bugfix: this whole object used to be `const AudioSessionConfiguration(...)`.
-    // `AVAudioSessionCategoryOptions` overloads `|` as a normal *instance*
-    // method (see audio_session's darwin.dart), and Dart's constant
-    // evaluator only folds `|`/`&`/etc. for the built-in numeric/bool/
-    // String types — it can't evaluate a user-defined operator overload
-    // at compile time. `allowBluetooth | defaultToSpeaker | mixWithOthers`
-    // is therefore not a valid *constant* expression, which is exactly
-    // what the analyzer/compiler was rejecting on these two lines.
-    // Dropping `const` here (the constructor itself stays `const`-capable
-    // for callers who don't need this combined-flags case) makes the `|`
-    // calls happen at ordinary runtime instead, which is perfectly legal
-    // Dart — this object is only ever built once at app boot anyway, so
-    // there's no performance reason to insist on `const`.
-    await session.configure(AudioSessionConfiguration(
-      avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-      avAudioSessionCategoryOptions:
-          AVAudioSessionCategoryOptions.allowBluetooth |
-              AVAudioSessionCategoryOptions.defaultToSpeaker |
-              AVAudioSessionCategoryOptions.mixWithOthers,
-      avAudioSessionMode: AVAudioSessionMode.voiceChat,
-      avAudioSessionRouteSharingPolicy:
-          AVAudioSessionRouteSharingPolicy.defaultPolicy,
-      avAudioSessionSetActiveOptions:
-          AVAudioSessionSetActiveOptions.notifyOthersOnDeactivation,
-      androidAudioAttributes: const AndroidAudioAttributes(
-        contentType: AndroidAudioContentType.speech,
-        usage: AndroidAudioUsage.voiceCommunication,
-      ),
-      androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
-      androidWillPauseWhenDucked: false,
-    ));
+  /// Configures the shared `AudioSession` for an active WebRTC call.
+  /// Called when a call is placed or accepted, so the app handles
+  /// mic input and audio communication properly without locking normal
+  /// chat media playback at app boot.
+  static Future<void> configureCallAudioSession() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
+        avAudioSessionCategoryOptions:
+            AVAudioSessionCategoryOptions.allowBluetooth |
+                AVAudioSessionCategoryOptions.defaultToSpeaker |
+                AVAudioSessionCategoryOptions.mixWithOthers,
+        avAudioSessionMode: AVAudioSessionMode.voiceChat,
+        avAudioSessionRouteSharingPolicy:
+            AVAudioSessionRouteSharingPolicy.defaultPolicy,
+        avAudioSessionSetActiveOptions:
+            AVAudioSessionSetActiveOptions.notifyOthersOnDeactivation,
+        androidAudioAttributes: const AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          usage: AndroidAudioUsage.voiceCommunication,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: false,
+      ));
+      // Proactively route to speakerphone so dialing/ringing tones and
+      // preview audio play out of the main loudspeaker from the very start.
+      try {
+        await Helper.setSpeakerphoneOn(true);
+      } catch (_) {}
+    } catch (_) {}
   }
+
+  /// Restores the shared `AudioSession` to default media playback.
+  /// Ensures voice notes in chat and other media play through the loud
+  /// speaker instead of being trapped in earpiece/voice-communication mode.
+  static Future<void> restoreDefaultAudioSession() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        avAudioSessionCategoryOptions:
+            AVAudioSessionCategoryOptions.defaultToSpeaker,
+        avAudioSessionMode: AVAudioSessionMode.defaultMode,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.music,
+          usage: AndroidAudioUsage.media,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gain,
+        androidWillPauseWhenDucked: true,
+      ));
+    } catch (_) {}
+  }
+
+  /// Alias for backward compatibility.
+  static Future<void> configureAudioSession() => configureCallAudioSession();
 
   static void _assertInitialized() {
     if (!_initialized) {

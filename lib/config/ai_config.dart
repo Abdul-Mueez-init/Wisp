@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../core/errors/failure.dart';
@@ -10,28 +11,6 @@ import '../core/errors/failure.dart';
 /// Feature code (translation/, ai_agent/, voice_notes/) must call
 /// AiConfig methods only — never instantiate Gemini/Groq SDKs directly
 /// (rules.md Rule 8).
-///
-/// Bugfix (post-Phase-11, live-outage triage): both models this file
-/// previously pointed at were dead — `gemini-1.5-flash` 404s on every
-/// call (the entire Gemini 1.0/1.5 family has been fully shut down by
-/// Google) and Groq deprecated `llama-3.1-8b-instant` June 17, 2026.
-/// Every call site already wraps `AiConfig` calls in a silent catch
-/// (so as not to block message send on a translation/agent/transcription
-/// failure), which is exactly why this looked like "the AI features were
-/// never built" instead of a loud error. Also dropped the
-/// `google_generative_ai` package entirely — it's deprecated and archived
-/// upstream in favor of `firebase_ai`, which needs a full Firebase project
-/// wired up (too heavy a lift for a model-string fix). Google's own docs
-/// confirm the plain REST `generateContent` endpoint "remains fully
-/// supported" even after their newer Interactions API, so this file now
-/// calls it directly with the `http` package already used for Groq below
-/// — no new dependency, no Firebase setup, still zero-cost.
-/// Current replacements (verified against Google's/Groq's live docs,
-/// Aug 2026): `gemini-3.5-flash` (free-tier, multimodal — text, image,
-/// video, audio, PDF in, text out) and Groq's `openai/gpt-oss-20b`
-/// (Groq's own recommended migration target for the retired 3.1-8b-instant,
-/// also free-tier, same OpenAI-compatible chat-completions shape so no
-/// request-building changes were needed there).
 class AiConfig {
   AiConfig._();
 
@@ -39,19 +18,26 @@ class AiConfig {
   static late final String _groqApiKey;
   static bool _initialized = false;
 
-  static const String _geminiModel = 'gemini-3.5-flash';
+  static const String _geminiModel = 'gemini-3.6-flash';
   static const String _geminiEndpoint =
       'https://generativelanguage.googleapis.com/v1beta/models/$_geminiModel:generateContent';
   static const String _groqModel = 'openai/gpt-oss-20b';
   static const String _groqEndpoint =
       'https://api.groq.com/openai/v1/chat/completions';
+  static const String _groqAudioEndpoint =
+      'https://api.groq.com/openai/v1/audio/transcriptions';
+  static const String _groqAudioModel = 'whisper-large-v3-turbo';
+
+  // Standard client User-Agent preventing Cloudflare 403 (Error 1010) on api.groq.com
+  static const String _userAgent =
+      'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 
   static void initialize({
     required String geminiApiKey,
     required String groqApiKey,
   }) {
-    _geminiApiKey = geminiApiKey;
-    _groqApiKey = groqApiKey;
+    _geminiApiKey = geminiApiKey.trim().replaceAll('"', '').replaceAll("'", '');
+    _groqApiKey = groqApiKey.trim().replaceAll('"', '').replaceAll("'", '');
     _initialized = true;
   }
 
@@ -120,7 +106,7 @@ class AiConfig {
     };
 
     final response = await http.post(
-      Uri.parse(_geminiEndpoint),
+      Uri.parse('$_geminiEndpoint?key=$_geminiApiKey'),
       headers: {
         'Content-Type': 'application/json',
         'x-goog-api-key': _geminiApiKey,
@@ -195,14 +181,48 @@ class AiConfig {
     return content;
   }
 
-  /// Native audio input (Gemini only — used by AI Feature 3, Phase 9).
-  /// Groq's free tier does not offer a comparable native audio model,
-  /// so voice transcription has no fallback path; failures surface as
-  /// AiFailure and must be handled by the caller (voice_notes/ feature).
+  static Future<String> _callGroqWhisper({
+    required Uint8List audioBytes,
+    String filename = 'audio.m4a',
+  }) async {
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse(_groqAudioEndpoint),
+    );
+    request.headers['Authorization'] = 'Bearer $_groqApiKey';
+    request.fields['model'] = _groqAudioModel;
+    request.fields['response_format'] = 'json';
+
+    request.files.add(http.MultipartFile.fromBytes(
+      'file',
+      audioBytes,
+      filename: filename,
+    ));
+
+    final streamedResponse = await request.send();
+    final response = await http.Response.fromStream(streamedResponse);
+
+    if (response.statusCode != 200) {
+      throw AiFailure(
+        'Groq Whisper failed with status ${response.statusCode}: ${response.body}',
+      );
+    }
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final text = decoded['text'] as String?;
+    if (text == null || text.trim().isEmpty) {
+      throw const AiFailure('Groq Whisper returned an empty transcript.');
+    }
+    return text.trim();
+  }
+
+  /// Audio transcription: tries Gemini native audio first, and seamlessly
+  /// falls back to Groq Whisper Large V3 Turbo on error/rate-limit/503.
   static Future<String> generateFromAudio({
     required Uint8List audioBytes,
     required String mimeType,
     required String prompt,
+    String filename = 'audio.m4a',
   }) async {
     _assertInitialized();
     try {
@@ -217,8 +237,18 @@ class AiConfig {
           },
         ],
       );
-    } catch (e) {
-      throw AiFailure('Gemini audio transcription failed: $e');
+    } catch (geminiError) {
+      try {
+        return await _callGroqWhisper(
+          audioBytes: audioBytes,
+          filename: filename,
+        );
+      } catch (groqError) {
+        throw AiFailure(
+          'Both Gemini audio and Groq Whisper transcription failed. '
+          'Gemini error: $geminiError. Groq error: $groqError.',
+        );
+      }
     }
   }
 }

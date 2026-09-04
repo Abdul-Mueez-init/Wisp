@@ -174,20 +174,25 @@ class MessageRepository {
     }
   }
 
-  Future<void> sendTextMessage({
+  Future<String?> sendTextMessage({
     required String conversationId,
     required String senderId,
     required String content,
   }) async {
     final trimmed = content.trim();
-    if (trimmed.isEmpty) return;
+    if (trimmed.isEmpty) return null;
     try {
-      await _client.from('messages').insert({
-        'conversation_id': conversationId,
-        'sender_id': senderId,
-        'type': 'text',
-        'content': trimmed,
-      });
+      final row = await _client
+          .from('messages')
+          .insert({
+            'conversation_id': conversationId,
+            'sender_id': senderId,
+            'type': 'text',
+            'content': trimmed,
+          })
+          .select('id')
+          .single();
+      return row['id'] as String?;
     } on PostgrestException catch (e) {
       throw SupabaseFailure(e.message);
     }

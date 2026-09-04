@@ -1,42 +1,36 @@
-// lib/features/calls/data/call_sound_player.dart
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:just_audio/just_audio.dart';
 
 /// The looping "beep… beep…" tone played from the moment a call starts
 /// dialing/ringing until it's answered (or cancelled/declined/ends).
-/// Generates its own short WAV in memory via a plain sine-wave synth —
-/// deliberately not a bundled asset file: it means zero pubspec changes,
-/// zero binary asset to ship, and the exact same tone on every platform.
-/// One instance is owned by [CallController] and started/stopped purely
-/// off `CallPhase` transitions — matches the "one small wrapper, nothing
-/// else touches the underlying player directly" discipline used
-/// elsewhere (AiConfig, WebrtcConfig).
+/// Generates its own WAV file in temporary cache storage via a sine-wave synth.
 ///
-/// Bugfix (reported: "can't hear the beep sound mid call"): the caller
-/// grabs the microphone (`getUserMedia`, in `WebrtcSession.initLocalMedia`)
-/// within a fraction of a second of `outgoingRinging` starting this
-/// tone. On Android, grabbing the mic for WebRTC switches the whole
-/// app into `MODE_IN_COMMUNICATION` and requests audio focus for voice
-/// communication — a plain `just_audio` player defaults to a MUSIC-type
-/// audio session, which loses/gets ducked by that focus request almost
-/// immediately, so the dial tone went effectively silent for nearly the
-/// entire ringing period. `AndroidAudioUsage.voiceCommunicationSignalling`
-/// is the Android platform's own purpose-built usage type for exactly
-/// this case ("sounds associated with the operation of voice
-/// communication signalling, such as a dial tone or a busy signal") —
-/// tagging this player with it keeps it audible alongside an active
-/// WebRTC voice session instead of competing with it for focus.
+/// Configured with:
+/// - `handleInterruptions: false` so WebRTC microphone acquisition (MODE_IN_COMMUNICATION)
+///   does not pause or duck this player.
+/// - `handleAudioSessionActivation: false` so just_audio does not fight WebRTC's
+///   audio session lifecycle.
+/// - `androidApplyAudioAttributes: false` so global audio session changes do not
+///   overwrite the dedicated signaling/ringtone attributes configured on this player.
+/// - File-based playback (`setFilePath`) to avoid Android 9+ cleartext HTTP proxy restrictions.
 enum _ToneType {
   dialTone,
   ringtone,
 }
 
 class CallSoundPlayer {
-  CallSoundPlayer() : _player = AudioPlayer();
+  CallSoundPlayer()
+      : _player = AudioPlayer(
+          handleInterruptions: false,
+          handleAudioSessionActivation: false,
+          androidApplyAudioAttributes: false,
+        );
 
   final AudioPlayer _player;
   _ToneType? _loadedToneType;
@@ -66,6 +60,7 @@ class CallSoundPlayer {
   Future<void> _ensureReady(_ToneType type) async {
     if (_loadedToneType == type) return;
 
+    final tempDir = Directory.systemTemp;
     if (type == _ToneType.ringtone) {
       // Incoming ringtone: must play loud through the loudspeaker
       // with standard notification/ringtone audio attributes.
@@ -74,25 +69,34 @@ class CallSoundPlayer {
         contentType: AndroidAudioContentType.music,
       ));
       await _player.setVolume(1.0);
-      final bytes = _buildRingtoneWav();
-      await _player.setAudioSource(_InMemoryWavSource(bytes, tag: 'ringtone'));
+      final file = File('${tempDir.path}/wisp_ringtone.wav');
+      if (!await file.exists() || await file.length() == 0) {
+        final bytes = _buildRingtoneWav();
+        await file.writeAsBytes(bytes, flush: true);
+      }
+      await _player.setFilePath(file.path);
     } else {
-      // Outgoing dial/ringback tone: must use voice communication signalling
-      // so it remains audible alongside active WebRTC audio focus.
+      // Outgoing dial/ringback tone: must be tagged as voiceCommunicationSignalling
+      // so it is routed to the active communication audio stream (speakerphone)
+      // without being ducked or muted by WebRTC's MODE_IN_COMMUNICATION.
       await _player.setAndroidAudioAttributes(const AndroidAudioAttributes(
         usage: AndroidAudioUsage.voiceCommunicationSignalling,
         contentType: AndroidAudioContentType.sonification,
       ));
-      await _player.setVolume(0.7);
-      final bytes = _buildDialToneWav();
-      await _player.setAudioSource(_InMemoryWavSource(bytes, tag: 'dialtone'));
+      await _player.setVolume(1.0);
+      final file = File('${tempDir.path}/wisp_dialtone.wav');
+      if (!await file.exists() || await file.length() == 0) {
+        final bytes = _buildDialToneWav();
+        await file.writeAsBytes(bytes, flush: true);
+      }
+      await _player.setFilePath(file.path);
     }
 
-    await _player.setLoopMode(LoopMode.all);
+    await _player.setLoopMode(LoopMode.one);
     _loadedToneType = type;
   }
 
-  /// Requests the outgoing dial/ringback tone (soft double-beep cadence).
+  /// Requests the outgoing dial/ringback tone (clear dual-frequency beep cadence).
   Future<void> startDialTone() => _requestPlay(_ToneType.dialTone);
 
   /// Requests the incoming ringtone (loud melodic chime).
@@ -108,6 +112,7 @@ class CallSoundPlayer {
       if (!_desiredPlaying) return;
       if (_playing && _loadedToneType == _desiredToneType) return;
       try {
+        debugPrint('CallSoundPlayer: starting ${_desiredToneType.name} tone...');
         await _ensureReady(_desiredToneType);
         if (!_desiredPlaying) return;
         await _player.seek(Duration.zero);
@@ -117,8 +122,9 @@ class CallSoundPlayer {
         }
         _playing = true;
         await _player.play();
-      } catch (_) {
-        // Best-effort — an audio plugin hiccup must never block the call.
+        debugPrint('CallSoundPlayer: ${_desiredToneType.name} tone is playing');
+      } catch (e, st) {
+        debugPrint('CallSoundPlayer error playing tone: $e\n$st');
         _playing = false;
       }
     });
@@ -149,13 +155,15 @@ class CallSoundPlayer {
     } catch (_) {}
   }
 
-  /// Synthesizes a soft double-beep cadence (~2.5s loop, 16-bit mono
-  /// PCM wrapped in a minimal WAV header) for outgoing dial tone.
+  /// Synthesizes a standard dual-frequency telephone ringback tone
+  /// (440Hz + 480Hz, 0.4s beep + 0.2s pause + 0.4s beep + 2.0s pause, ~3s loop)
+  /// for outgoing dial tone. Auditory clarity is prioritized so it is
+  /// unmistakable over the loudspeaker.
   static Uint8List _buildDialToneWav() {
     const sr = _sampleRate;
     final samples = <double>[];
 
-    void addTone(double freqHz, double durSec, {double vol = 0.5}) {
+    void addDualTone(double f1, double f2, double durSec, {double vol = 0.85}) {
       final n = (sr * durSec).round();
       final fadeN = (sr * 0.02).round();
       for (var i = 0; i < n; i++) {
@@ -166,7 +174,9 @@ class CallSoundPlayer {
         } else if (i > n - fadeN) {
           amp *= (n - i) / fadeN;
         }
-        samples.add(amp * math.sin(2 * math.pi * freqHz * t));
+        final s = 0.5 * math.sin(2 * math.pi * f1 * t) +
+            0.5 * math.sin(2 * math.pi * f2 * t);
+        samples.add(amp * s);
       }
     }
 
@@ -174,9 +184,11 @@ class CallSoundPlayer {
       samples.addAll(List.filled((sr * durSec).round(), 0.0));
     }
 
-    addTone(950, 0.18, vol: 0.5);
-    addSilence(0.10);
-    addTone(950, 0.18, vol: 0.5);
+    // Standard European/WhatsApp ringback cadence:
+    // Beep (400ms) - silence (200ms) - Beep (400ms) - silence (2000ms)
+    addDualTone(440, 480, 0.40);
+    addSilence(0.20);
+    addDualTone(440, 480, 0.40);
     addSilence(2.0);
 
     final pcm = ByteData(samples.length * 2);
@@ -275,25 +287,5 @@ class CallSoundPlayer {
       ..add(header.toBytes())
       ..add(pcmBytes);
     return builder.toBytes();
-  }
-}
-
-/// Feeds the in-memory WAV bytes to just_audio without a bundled asset
-/// file or a temp file on disk.
-class _InMemoryWavSource extends StreamAudioSource {
-  _InMemoryWavSource(this._bytes, {super.tag = 'call_ring_tone'});
-  final Uint8List _bytes;
-
-  @override
-  Future<StreamAudioResponse> request([int? start, int? end]) async {
-    start ??= 0;
-    end ??= _bytes.length;
-    return StreamAudioResponse(
-      sourceLength: _bytes.length,
-      contentLength: end - start,
-      offset: start,
-      stream: Stream.value(_bytes.sublist(start, end)),
-      contentType: 'audio/wav',
-    );
   }
 }

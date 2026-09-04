@@ -45,7 +45,7 @@ class WebrtcConfig {
   static Future<void> configureCallAudioSession() async {
     try {
       final session = await AudioSession.instance;
-      await session.configure(const AudioSessionConfiguration(
+      await session.configure(AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
         avAudioSessionCategoryOptions:
             AVAudioSessionCategoryOptions.allowBluetooth |
@@ -77,7 +77,7 @@ class WebrtcConfig {
   static Future<void> restoreDefaultAudioSession() async {
     try {
       final session = await AudioSession.instance;
-      await session.configure(const AudioSessionConfiguration(
+      await session.configure(AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playback,
         avAudioSessionCategoryOptions:
             AVAudioSessionCategoryOptions.defaultToSpeaker,

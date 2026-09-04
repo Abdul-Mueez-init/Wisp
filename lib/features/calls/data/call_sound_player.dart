@@ -112,7 +112,8 @@ class CallSoundPlayer {
       if (!_desiredPlaying) return;
       if (_playing && _loadedToneType == _desiredToneType) return;
       try {
-        debugPrint('CallSoundPlayer: starting ${_desiredToneType.name} tone...');
+        debugPrint(
+            'CallSoundPlayer: starting ${_desiredToneType.name} tone...');
         await _ensureReady(_desiredToneType);
         if (!_desiredPlaying) return;
         await _player.seek(Duration.zero);
@@ -121,7 +122,18 @@ class CallSoundPlayer {
           return;
         }
         _playing = true;
-        await _player.play();
+        // Deliberately NOT awaited: just_audio's play() Future only
+        // completes when playback pauses/stops, and since these tones
+        // loop (LoopMode.one), that never happens on its own. Awaiting
+        // it here would block this op forever, which in turn blocks
+        // every future queued after it (including stop()'s pause call)
+        // behind it in the FIFO — the exact deadlock that made the
+        // beep never stop, on either answer or cancel. We only need to
+        // trigger playback, not wait for it to end.
+        unawaited(_player.play().catchError((Object e, StackTrace st) {
+          debugPrint('CallSoundPlayer playback error: $e\n$st');
+          _playing = false;
+        }));
         debugPrint('CallSoundPlayer: ${_desiredToneType.name} tone is playing');
       } catch (e, st) {
         debugPrint('CallSoundPlayer error playing tone: $e\n$st');

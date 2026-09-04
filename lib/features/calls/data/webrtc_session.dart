@@ -131,10 +131,24 @@ class WebrtcSession {
   /// it — candidates can race ahead of the SDP over a broadcast
   /// channel with no ordering guarantee between event types.
   Future<void> setRemoteDescription(Map<String, dynamic> payload) async {
-    final desc = RTCSessionDescription(
-      payload['sdp'] as String,
-      payload['type'] as String,
-    );
+    final data = payload['payload'] is Map
+        ? Map<String, dynamic>.from(payload['payload'] as Map)
+        : payload;
+    final sdp = data['sdp'] as String?;
+    var type = data['type'] as String?;
+    if (type == 'broadcast' || type == null) {
+      // If the outer envelope leaked through or type wasn't provided,
+      // deduce from the current signaling state: if we already sent a local offer,
+      // the remote description is an answer; otherwise it's an offer.
+      type = (_pc?.signalingState ==
+              RTCSignalingState.RTCSignalingStateHaveLocalOffer)
+          ? 'answer'
+          : 'offer';
+    }
+    if (sdp == null) {
+      throw ArgumentError('Invalid SDP payload received: $payload');
+    }
+    final desc = RTCSessionDescription(sdp, type);
     await _pc!.setRemoteDescription(desc);
     _remoteDescriptionSet = true;
     for (final candidate in _pendingRemoteCandidates) {
@@ -144,10 +158,15 @@ class WebrtcSession {
   }
 
   Future<void> addRemoteIceCandidate(Map<String, dynamic> payload) async {
+    final data = payload['payload'] is Map
+        ? Map<String, dynamic>.from(payload['payload'] as Map)
+        : payload;
+    final candidateStr = data['candidate'] as String?;
+    if (candidateStr == null || candidateStr.isEmpty) return;
     final candidate = RTCIceCandidate(
-      payload['candidate'] as String?,
-      payload['sdpMid'] as String?,
-      payload['sdpMLineIndex'] as int?,
+      candidateStr,
+      data['sdpMid'] as String?,
+      data['sdpMLineIndex'] as int?,
     );
     if (_remoteDescriptionSet) {
       await _pc!.addCandidate(candidate);

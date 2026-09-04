@@ -72,7 +72,7 @@ class WebrtcConfig {
           AVAudioSessionRouteSharingPolicy.defaultPolicy,
       avAudioSessionSetActiveOptions:
           AVAudioSessionSetActiveOptions.notifyOthersOnDeactivation,
-      androidAudioAttributes: AndroidAudioAttributes(
+      androidAudioAttributes: const AndroidAudioAttributes(
         contentType: AndroidAudioContentType.speech,
         usage: AndroidAudioUsage.voiceCommunication,
       ),
@@ -91,16 +91,23 @@ class WebrtcConfig {
 
   /// Raw ICE server list, in the shape `flutter_webrtc`'s
   /// `RTCConfiguration`/`RTCPeerConnection.new` expects under the
-  /// `iceServers` key.
+  /// `iceServers` key. Supports comma-separated UDP and TCP/TLS TURN URLs.
   static List<Map<String, dynamic>> get iceServers {
     _assertInitialized();
     final servers = <Map<String, dynamic>>[_publicStunServer];
     if (_turnUrl.isNotEmpty) {
-      servers.add({
-        'urls': _turnUrl,
-        if (_turnUsername.isNotEmpty) 'username': _turnUsername,
-        if (_turnCredential.isNotEmpty) 'credential': _turnCredential,
-      });
+      final urls = _turnUrl
+          .split(',')
+          .map((u) => u.trim())
+          .where((u) => u.isNotEmpty)
+          .toList();
+      if (urls.isNotEmpty) {
+        servers.add({
+          'urls': urls.length == 1 ? urls.first : urls,
+          if (_turnUsername.isNotEmpty) 'username': _turnUsername,
+          if (_turnCredential.isNotEmpty) 'credential': _turnCredential,
+        });
+      }
     }
     return servers;
   }

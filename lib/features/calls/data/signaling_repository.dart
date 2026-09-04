@@ -61,15 +61,16 @@ class SignalingRepository {
     channel
         .onBroadcast(
           event: 'offer',
-          callback: (payload) => _offerController.add(payload),
+          callback: (payload) => _offerController.add(_unwrapPayload(payload)),
         )
         .onBroadcast(
           event: 'answer',
-          callback: (payload) => _answerController.add(payload),
+          callback: (payload) => _answerController.add(_unwrapPayload(payload)),
         )
         .onBroadcast(
           event: 'ice-candidate',
-          callback: (payload) => _iceCandidateController.add(payload),
+          callback: (payload) =>
+              _iceCandidateController.add(_unwrapPayload(payload)),
         )
         .onBroadcast(
           event: 'hangup',
@@ -99,14 +100,28 @@ class SignalingRepository {
   Future<void> sendIceCandidate(Map<String, dynamic> candidate) =>
       _send('ice-candidate', candidate);
 
-  Future<void> sendHangup() => _send('hangup', const {});
+  Future<void> sendHangup() => _send('hangup', <String, dynamic>{});
 
-  Future<void> sendRingingAck() => _send('ringing_ack', const {});
+  Future<void> sendRingingAck() => _send('ringing_ack', <String, dynamic>{});
+
+  /// Unwraps Supabase Realtime's outer broadcast envelope
+  /// (e.g. `{"event": "offer", "type": "broadcast", "payload": {...}}`)
+  /// so listeners receive the actual inner payload directly.
+  static Map<String, dynamic> _unwrapPayload(Map<String, dynamic> raw) {
+    final nested = raw['payload'];
+    if (nested is Map) {
+      return Map<String, dynamic>.from(nested);
+    }
+    return raw;
+  }
 
   Future<void> _send(String event, Map<String, dynamic> payload) async {
     final channel = _channel;
     if (channel == null) return;
-    await channel.sendBroadcastMessage(event: event, payload: payload);
+    // Always clone into a fresh mutable map so internal realtime SDK mutation
+    // (payload['type'] = ...) never crashes on an unmodifiable/const map.
+    final mutablePayload = Map<String, dynamic>.from(payload);
+    await channel.sendBroadcastMessage(event: event, payload: mutablePayload);
   }
 
   /// Leaves the channel and closes local stream controllers. Safe to

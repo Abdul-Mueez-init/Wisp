@@ -61,8 +61,10 @@ class CallController extends Notifier<CallSessionState> {
   StreamSubscription<void>? _ringingAckSub;
 
   Map<String, dynamic>? _pendingOffer;
+  Map<String, dynamic>? _localOffer;
   String? _watchedIncomingCallId;
   Timer? _ringingAckResendTimer;
+  Timer? _offerResendTimer;
   Timer? _reconnectGraceTimer;
 
   @override
@@ -133,7 +135,23 @@ class CallController extends Notifier<CallSessionState> {
       state = state.copyWith(isSpeakerOn: session.isSpeakerOn);
 
       final offer = await session.createOffer();
+      _localOffer = offer;
       await signaling.sendOffer(offer);
+
+      // WhatsApp-style offer resend: periodic broadcast ensures the offer
+      // reaches the callee even if postgres replication / channel joining takes 1-3 seconds.
+      _offerResendTimer?.cancel();
+      _offerResendTimer =
+          Timer.periodic(const Duration(milliseconds: 1500), (t) {
+        if ((state.phase == CallPhase.outgoingRinging ||
+                state.phase == CallPhase.connecting) &&
+            _localOffer != null &&
+            _signaling != null) {
+          unawaited(_signaling!.sendOffer(_localOffer!));
+        } else {
+          t.cancel();
+        }
+      });
       return true;
     } catch (e) {
       state = state.copyWith(
@@ -203,7 +221,8 @@ class CallController extends Notifier<CallSessionState> {
     // call).
     unawaited(signaling.sendRingingAck());
     _ringingAckResendTimer?.cancel();
-    _ringingAckResendTimer = Timer.periodic(const Duration(seconds: 2), (t) {
+    _ringingAckResendTimer =
+        Timer.periodic(const Duration(milliseconds: 1500), (t) {
       if (state.phase == CallPhase.incomingRinging &&
           state.call?.id == call.id) {
         unawaited(signaling.sendRingingAck());
@@ -239,6 +258,7 @@ class CallController extends Notifier<CallSessionState> {
     if (signaling == null || call == null) return false;
 
     _ringingAckResendTimer?.cancel();
+    _ringingAckResendTimer = null;
     state = state.copyWith(phase: CallPhase.connecting);
     _syncSound();
     try {
@@ -258,10 +278,21 @@ class CallController extends Notifier<CallSessionState> {
       await session.initPeerConnection();
       state = state.copyWith(isSpeakerOn: session.isSpeakerOn);
 
-      // The offer may not have arrived yet even though the caller
-      // sends it almost immediately — wait briefly rather than
-      // failing outright.
-      final offer = _pendingOffer ?? await signaling.onOffer.first;
+      // If offer is already buffered, use it immediately; otherwise nudge
+      // caller and wait briefly for the next offer broadcast.
+      Map<String, dynamic>? offer = _pendingOffer;
+      if (offer == null) {
+        unawaited(signaling.sendRingingAck());
+        try {
+          offer = await signaling.onOffer.first
+              .timeout(const Duration(seconds: 4));
+        } catch (_) {
+          offer = _pendingOffer;
+        }
+      }
+      if (offer == null) {
+        throw StateError('Call offer was not received from caller');
+      }
       final answer = await session.createAnswer(offer);
       await signaling.sendAnswer(answer);
 
@@ -298,6 +329,7 @@ class CallController extends Notifier<CallSessionState> {
   Future<void> declineCall() async {
     if (state.phase != CallPhase.incomingRinging) return;
     _ringingAckResendTimer?.cancel();
+    _ringingAckResendTimer = null;
     final call = state.call;
     if (call != null) {
       try {
@@ -322,6 +354,10 @@ class CallController extends Notifier<CallSessionState> {
   /// action, 'declined' is reserved for the callee's explicit reject
   /// (see [declineCall]).
   Future<void> endCall() async {
+    _offerResendTimer?.cancel();
+    _offerResendTimer = null;
+    _ringingAckResendTimer?.cancel();
+    _ringingAckResendTimer = null;
     final call = state.call;
     if (call != null) {
       final reachedActive = state.phase == CallPhase.active;
@@ -395,6 +431,8 @@ class CallController extends Notifier<CallSessionState> {
 
   void _wireSignalingListeners(SignalingRepository signaling) {
     _answerSub = signaling.onAnswer.listen((answer) async {
+      _offerResendTimer?.cancel();
+      _offerResendTimer = null;
       final session = _session;
       final call = state.call;
       if (session == null || call == null) return;
@@ -408,15 +446,6 @@ class CallController extends Notifier<CallSessionState> {
         callConnectedAt: DateTime.now(),
       );
       _syncSound();
-      // Bugfix: writing the shared `calls` history row to 'ongoing' is
-      // bookkeeping, not part of the handshake — it must never be able
-      // to tear down a call that has already connected. This used to
-      // sit inside the same unprotected block above, so any hiccup on
-      // this single DB write (RLS timing, a token refresh mid-call, a
-      // dropped packet) threw, and nothing here caught it — an
-      // uncaught error inside a stream listener, with the call already
-      // live. Best-effort now, matching endCall()/declineCall()'s
-      // existing pattern elsewhere in this file.
       try {
         await ref
             .read(callRepositoryProvider)
@@ -433,12 +462,17 @@ class CallController extends Notifier<CallSessionState> {
 
     _hangupSub = signaling.onHangup.listen((_) => _onRemoteHangup());
 
-    // Caller-side "Calling…" -> "Ringing…" — harmless no-op on the
-    // callee side, since `self: false` means a client never receives
-    // its own broadcasts back anyway.
+    // Caller-side "Calling…" -> "Ringing…" — callee has joined the channel.
+    // Immediately resend the cached offer so the callee receives it.
     _ringingAckSub = signaling.onRingingAck.listen((_) {
       if (!state.isRemoteRinging) {
         state = state.copyWith(isRemoteRinging: true);
+      }
+      final offer = _localOffer;
+      if (offer != null &&
+          (state.phase == CallPhase.outgoingRinging ||
+              state.phase == CallPhase.connecting)) {
+        unawaited(signaling.sendOffer(offer));
       }
     });
   }
@@ -484,19 +518,31 @@ class CallController extends Notifier<CallSessionState> {
     }
   }
 
-  /// Starts/stops the ring/dial tone purely off the current phase — the
-  /// tone plays from the moment a call starts dialing/ringing until it
-  /// becomes active (or ends/is declined/cancelled).
+  /// Starts/stops the ring/dial tone purely off the current phase —
+  /// dial tone for caller during outgoingRinging, loud melody ringtone
+  /// for callee during incomingRinging, stopped on active/ended.
   void _syncSound() {
-    const ringingPhases = {
-      CallPhase.outgoingRinging,
-      CallPhase.incomingRinging,
-      CallPhase.connecting,
-    };
-    if (ringingPhases.contains(state.phase)) {
-      unawaited(_sound.start());
-    } else {
-      unawaited(_sound.stop());
+    switch (state.phase) {
+      case CallPhase.outgoingRinging:
+        unawaited(_sound.startDialTone());
+        break;
+      case CallPhase.incomingRinging:
+        unawaited(_sound.startRingtone());
+        break;
+      case CallPhase.connecting:
+        // If we are dialing, continue dial tone; otherwise silence
+        if (state.call != null &&
+            state.otherUserId == state.call?.callerId) {
+          unawaited(_sound.stop());
+        } else {
+          unawaited(_sound.startDialTone());
+        }
+        break;
+      case CallPhase.active:
+      case CallPhase.ended:
+      case CallPhase.idle:
+        unawaited(_sound.stop());
+        break;
     }
   }
 
@@ -512,7 +558,10 @@ class CallController extends Notifier<CallSessionState> {
     _hangupSub = null;
     _ringingAckSub = null;
     _pendingOffer = null;
+    _localOffer = null;
     _watchedIncomingCallId = null;
+    _offerResendTimer?.cancel();
+    _offerResendTimer = null;
     _ringingAckResendTimer?.cancel();
     _ringingAckResendTimer = null;
     _reconnectGraceTimer?.cancel();

@@ -30,11 +30,16 @@ import 'package:just_audio/just_audio.dart';
 /// communication signalling, such as a dial tone or a busy signal") —
 /// tagging this player with it keeps it audible alongside an active
 /// WebRTC voice session instead of competing with it for focus.
+enum _ToneType {
+  dialTone,
+  ringtone,
+}
+
 class CallSoundPlayer {
   CallSoundPlayer() : _player = AudioPlayer();
 
   final AudioPlayer _player;
-  bool _ready = false;
+  _ToneType? _loadedToneType;
   bool _playing = false;
 
   /// The last state actually requested (by CallController's phase
@@ -44,19 +49,10 @@ class CallSoundPlayer {
   /// resolves to what was most recently asked for — never to whichever
   /// async call happened to finish last.
   bool _desiredPlaying = false;
+  _ToneType _desiredToneType = _ToneType.dialTone;
 
-  /// Bugfix: start()/stop() used to each fire their own independent
-  /// async chain (`_ensureReady` → `seek` → `play`, or `pause` →
-  /// `seek`). If a stop() landed while a start() from moments earlier
-  /// was still mid-flight (e.g. a call connects fast, so
-  /// connecting→active fires right after outgoingRinging→connecting),
-  /// the two could finish out of order: stop() would run first (pausing
-  /// nothing yet), then start()'s delayed `.play()` would fire *after*
-  /// it — leaving the tone audibly playing during a live call, with
-  /// `_playing` already (wrongly) reset to false so no later stop()
-  /// call would ever touch it again. Every start()/stop() request is
-  /// now funneled through this single FIFO queue so they always run in
-  /// the order requested, never overlapping.
+  /// Single FIFO queue ensuring start()/stop() requests always run in
+  /// the order requested, never overlapping or finishing out of order.
   Future<void> _queue = Future.value();
 
   Future<void> _enqueue(Future<void> Function() op) {
@@ -67,34 +63,52 @@ class CallSoundPlayer {
 
   static const _sampleRate = 44100;
 
-  Future<void> _ensureReady() async {
-    if (_ready) return;
-    // Must be set before the first play() — this is what keeps the
-    // tone audible once WebRTC grabs the mic and switches Android into
-    // voice-communication audio focus (see class doc comment above).
-    await _player.setAndroidAudioAttributes(const AndroidAudioAttributes(
-      usage: AndroidAudioUsage.voiceCommunicationSignalling,
-      contentType: AndroidAudioContentType.sonification,
-    ));
-    final bytes = _buildToneWav();
-    await _player.setAudioSource(_InMemoryWavSource(bytes));
+  Future<void> _ensureReady(_ToneType type) async {
+    if (_loadedToneType == type) return;
+
+    if (type == _ToneType.ringtone) {
+      // Incoming ringtone: must play loud through the loudspeaker
+      // with standard notification/ringtone audio attributes.
+      await _player.setAndroidAudioAttributes(const AndroidAudioAttributes(
+        usage: AndroidAudioUsage.notificationRingtone,
+        contentType: AndroidAudioContentType.music,
+      ));
+      await _player.setVolume(1.0);
+      final bytes = _buildRingtoneWav();
+      await _player.setAudioSource(_InMemoryWavSource(bytes, tag: 'ringtone'));
+    } else {
+      // Outgoing dial/ringback tone: must use voice communication signalling
+      // so it remains audible alongside active WebRTC audio focus.
+      await _player.setAndroidAudioAttributes(const AndroidAudioAttributes(
+        usage: AndroidAudioUsage.voiceCommunicationSignalling,
+        contentType: AndroidAudioContentType.sonification,
+      ));
+      await _player.setVolume(0.7);
+      final bytes = _buildDialToneWav();
+      await _player.setAudioSource(_InMemoryWavSource(bytes, tag: 'dialtone'));
+    }
+
     await _player.setLoopMode(LoopMode.all);
-    _ready = true;
+    _loadedToneType = type;
   }
 
-  /// Requests the looping tone start. Safe to call repeatedly
-  /// (CallController calls this on every phase change while still
-  /// ringing/connecting) — queued and de-duped against any pending
-  /// stop().
-  Future<void> start() {
+  /// Requests the outgoing dial/ringback tone (soft double-beep cadence).
+  Future<void> startDialTone() => _requestPlay(_ToneType.dialTone);
+
+  /// Requests the incoming ringtone (loud melodic chime).
+  Future<void> startRingtone() => _requestPlay(_ToneType.ringtone);
+
+  /// Legacy alias: defaults to dial tone.
+  Future<void> start() => startDialTone();
+
+  Future<void> _requestPlay(_ToneType type) {
     _desiredPlaying = true;
+    _desiredToneType = type;
     return _enqueue(() async {
-      // A stop() was queued after this start() before we even got to
-      // run — honor the newer request, don't start at all.
       if (!_desiredPlaying) return;
-      if (_playing) return;
+      if (_playing && _loadedToneType == _desiredToneType) return;
       try {
-        await _ensureReady();
+        await _ensureReady(_desiredToneType);
         if (!_desiredPlaying) return;
         await _player.seek(Duration.zero);
         if (!_desiredPlaying) {
@@ -104,17 +118,13 @@ class CallSoundPlayer {
         _playing = true;
         await _player.play();
       } catch (_) {
-        // Best-effort — a missing audio output device or plugin hiccup
-        // must never block the actual call from proceeding.
+        // Best-effort — an audio plugin hiccup must never block the call.
         _playing = false;
       }
     });
   }
 
-  /// Requests the tone stop and rewind — called the instant a call
-  /// becomes active, ends, or is declined/cancelled, so the tone never
-  /// bleeds into a live call. Queued and de-duped against any pending
-  /// start().
+  /// Requests the tone stop and rewind.
   Future<void> stop() {
     _desiredPlaying = false;
     return _enqueue(() async {
@@ -140,8 +150,8 @@ class CallSoundPlayer {
   }
 
   /// Synthesizes a soft double-beep cadence (~2.5s loop, 16-bit mono
-  /// PCM wrapped in a minimal WAV header).
-  static Uint8List _buildToneWav() {
+  /// PCM wrapped in a minimal WAV header) for outgoing dial tone.
+  static Uint8List _buildDialToneWav() {
     const sr = _sampleRate;
     final samples = <double>[];
 
@@ -164,10 +174,62 @@ class CallSoundPlayer {
       samples.addAll(List.filled((sr * durSec).round(), 0.0));
     }
 
-    addTone(950, 0.18);
+    addTone(950, 0.18, vol: 0.5);
     addSilence(0.10);
-    addTone(950, 0.18);
+    addTone(950, 0.18, vol: 0.5);
     addSilence(2.0);
+
+    final pcm = ByteData(samples.length * 2);
+    for (var i = 0; i < samples.length; i++) {
+      final clamped = samples[i].clamp(-1.0, 1.0);
+      pcm.setInt16(i * 2, (clamped * 32767).round(), Endian.little);
+    }
+
+    return _wrapWav(pcm.buffer.asUint8List(), sr);
+  }
+
+  /// Synthesizes an energetic, pleasant musical ringtone (melodic chime
+  /// with harmonics, ~3s loop) for incoming call alerts.
+  static Uint8List _buildRingtoneWav() {
+    const sr = _sampleRate;
+    final samples = <double>[];
+
+    void addMelodyNote(double freqHz, double durSec, {double vol = 0.8}) {
+      final n = (sr * durSec).round();
+      final attackN = (sr * 0.01).round();
+      final decayN = (sr * (durSec - 0.01)).round();
+      for (var i = 0; i < n; i++) {
+        final t = i / sr;
+        var env = vol;
+        if (i < attackN) {
+          env *= (i / attackN);
+        } else {
+          env *= (1.0 - ((i - attackN) / decayN) * 0.6);
+        }
+        // Fundamental + overtone for a pleasant marimba/chime tone
+        final s = 0.7 * math.sin(2 * math.pi * freqHz * t) +
+            0.3 * math.sin(2 * math.pi * freqHz * 2 * t);
+        samples.add(env * s);
+      }
+    }
+
+    void addSilence(double durSec) {
+      samples.addAll(List.filled((sr * durSec).round(), 0.0));
+    }
+
+    // Melodic sequence: E5, G#5, B5, E6, B5, E6
+    addMelodyNote(659.25, 0.12);
+    addSilence(0.04);
+    addMelodyNote(830.61, 0.12);
+    addSilence(0.04);
+    addMelodyNote(987.77, 0.12);
+    addSilence(0.04);
+    addMelodyNote(1318.51, 0.28);
+    addSilence(0.12);
+    addMelodyNote(987.77, 0.14);
+    addSilence(0.04);
+    addMelodyNote(1318.51, 0.38);
+    addSilence(1.8);
 
     final pcm = ByteData(samples.length * 2);
     for (var i = 0; i < samples.length; i++) {
@@ -182,7 +244,7 @@ class CallSoundPlayer {
     const channels = 1;
     const bitsPerSample = 16;
     final byteRate = sampleRate * channels * bitsPerSample ~/ 8;
-    final blockAlign = channels * bitsPerSample ~/ 8;
+    const blockAlign = channels * bitsPerSample ~/ 8;
     final dataSize = pcmBytes.length;
 
     final header = BytesBuilder();
@@ -219,7 +281,7 @@ class CallSoundPlayer {
 /// Feeds the in-memory WAV bytes to just_audio without a bundled asset
 /// file or a temp file on disk.
 class _InMemoryWavSource extends StreamAudioSource {
-  _InMemoryWavSource(this._bytes) : super(tag: 'call_ring_tone');
+  _InMemoryWavSource(this._bytes, {super.tag = 'call_ring_tone'});
   final Uint8List _bytes;
 
   @override

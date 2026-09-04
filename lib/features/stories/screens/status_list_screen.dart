@@ -12,6 +12,7 @@ import '../../profile/providers/profile_provider.dart';
 import '../providers/story_provider.dart';
 import '../widgets/story_ring_avatar.dart';
 import 'story_viewer_screen.dart';
+import '../../../widgets/error_state_view.dart';
 
 /// Status tab (plan.md Phase 6, batches 6b/6c). Per design.md's Stitch
 /// export, grouped into "My status" / "Recent updates" / "Viewed
@@ -32,11 +33,13 @@ class StatusListScreen extends ConsumerWidget {
         child: groupsAsync.when(
           loading: () =>
               const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-          error: (e, _) => Center(
-            child: Padding(
-              padding: const EdgeInsets.all(AppSpacing.pageMargin),
-              child: Text('$e', style: const TextStyle(color: AppColors.error)),
-            ),
+          // Phase 11 polish: friendly copy + explicit retry, instead of
+          // the raw exception. Pull-to-refresh (RefreshIndicator above)
+          // already covers this, but a persistent error state with no
+          // affordance at all reads as broken rather than "swipe down".
+          error: (e, _) => ErrorStateView(
+            error: e,
+            onRetry: () => ref.refresh(activeStoryGroupsProvider),
           ),
           data: (groups) {
             StoryGroup? myGroup;

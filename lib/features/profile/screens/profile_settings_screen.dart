@@ -10,6 +10,7 @@ import '../../../core/constants/layout_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../providers/profile_provider.dart';
+import '../../../widgets/error_state_view.dart';
 
 /// Real Profile/Settings screen — design.md lists this as one of the
 /// 13 locked Stitch screens. Replaces the sign-out-only stub that
@@ -91,8 +92,11 @@ class _ProfileSettingsScreenState extends ConsumerState<ProfileSettingsScreen> {
       body: profileAsync.when(
         loading: () =>
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-        error: (e, _) => Center(
-          child: Text('$e', style: const TextStyle(color: AppColors.error)),
+        // Phase 11 polish: friendly copy + retry instead of the raw
+        // exception.
+        error: (e, _) => ErrorStateView(
+          error: e,
+          onRetry: () => ref.invalidate(currentProfileProvider),
         ),
         data: (profile) {
           if (profile == null) {

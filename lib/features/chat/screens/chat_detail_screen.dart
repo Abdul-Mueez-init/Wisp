@@ -18,6 +18,7 @@ import '../../location/providers/location_provider.dart';
 import '../../location/providers/live_location_provider.dart';
 import '../../ai_agent/providers/ai_agent_provider.dart';
 import '../../calls/providers/call_controller.dart';
+import '../../../widgets/error_state_view.dart';
 // You may need to add this import if it's not exported elsewhere:
 // import '../providers/chat_messages_controller.dart';
 
@@ -343,11 +344,13 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                   );
                 }
                 if (chatState.messages.isEmpty && chatState.error != null) {
-                  return Center(
-                    child: Text(
-                      'Could not load messages.\n${chatState.error}',
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodyMedium,
+                  // Phase 11 polish: friendly copy + retry instead of
+                  // the raw exception. Invalidating the (autoDispose)
+                  // controller re-runs its initial load from scratch.
+                  return ErrorStateView(
+                    error: chatState.error!,
+                    onRetry: () => ref.invalidate(
+                      chatMessagesControllerProvider(widget.conversationId),
                     ),
                   );
                 }

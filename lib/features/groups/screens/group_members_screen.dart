@@ -6,6 +6,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../contacts/providers/contacts_provider.dart';
 import '../providers/group_provider.dart';
+import '../../../widgets/error_state_view.dart';
 
 /// Admin-only member management per PRD.md section 6: "Only the group
 /// creator/admin can add/remove members and manage group settings."
@@ -133,8 +134,15 @@ class _GroupMembersScreenState extends ConsumerState<GroupMembersScreen> {
         },
         loading: () =>
             const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-        error: (e, _) => Center(
-          child: Text('$e', style: Theme.of(context).textTheme.bodyMedium),
+        // Phase 11 polish: friendly copy + retry instead of the raw
+        // exception (e.g. this fires with a bare "permission denied"
+        // string if RLS ever rejects a non-member somehow reaching
+        // this screen).
+        error: (e, _) => ErrorStateView(
+          error: e,
+          onRetry: () => ref.invalidate(
+            groupMembersProvider(widget.conversationId),
+          ),
         ),
       ),
     );
@@ -278,7 +286,11 @@ class _AddMemberSheetState extends ConsumerState<_AddMemberSheet> {
                 loading: () => const Center(
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
-                error: (e, _) => Center(child: Text('$e')),
+                // Phase 11 polish: no retry action here — it's a
+                // debounced live-search controller, not a one-shot
+                // fetch, so the natural "retry" is just editing the
+                // search text again, which the user is already doing.
+                error: (e, _) => ErrorStateView(error: e, compact: true),
               ),
             ),
           ],

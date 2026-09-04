@@ -13,6 +13,7 @@ import '../../chat/providers/message_provider.dart';
 import '../../profile/providers/profile_provider.dart';
 import '../providers/call_controller.dart';
 import '../providers/call_provider.dart';
+import '../../../widgets/error_state_view.dart';
 
 /// Calls tab (Batch 10c) — replaces AppShell's `_CallsStubScreen`.
 /// Per the Phase 10 handoff doc §3.5 (confirmed): call history is
@@ -71,15 +72,16 @@ class _CallsTabScreenState extends ConsumerState<CallsTabScreen> {
               child: CircularProgressIndicator(strokeWidth: 2),
             );
           }
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(AppSpacing.pageMargin),
-              child: Text(
-                'Could not load call history.\n$e',
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-            ),
+          // Phase 11 polish: friendly copy instead of the raw
+          // exception, plus a manual retry — the underlying stream
+          // already self-heals via resilient_realtime_stream.dart's
+          // backoff (Part B), but invalidating here lets the user
+          // force an immediate resubscribe rather than only waiting
+          // it out, for the case this grace period *does* expire on
+          // a genuinely persistent failure.
+          return ErrorStateView(
+            error: e,
+            onRetry: () => ref.invalidate(myVisibleCallsStreamProvider),
           );
         },
         data: (calls) {

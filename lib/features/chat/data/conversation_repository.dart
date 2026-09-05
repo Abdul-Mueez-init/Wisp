@@ -197,16 +197,13 @@ class ConversationRepository {
   /// and its unread count.
   ///
   /// The chat list is refreshed by realtime events, so this path must not
-  /// multiply work by opening a separate member and unread query for every
-  /// conversation. The member/profile lookup and unread-count lookup are
-  /// batched once for the whole list. The latest-message lookup remains one
-  /// bounded query per conversation because PostgREST cannot safely express
-  /// "latest row per conversation" with the current schema and no RPC.
-  ///
-  /// This preserves the existing data contract and sorting while reducing
-  /// the list refresh from roughly `1 + 3C` requests to `2 + C`, where `C`
-  /// is the number of conversations. The returned rows are still filtered
-  /// by the same RLS policies as before.
+  /// multiply work by pulling unbounded historical message tables.
+  /// Direct member profile lookup is batched once for the whole list.
+  /// Latest message and unread status are resolved together per conversation
+  /// in a bounded manner: if the newest message is already read or was sent
+  /// by [myId], unread count is zero immediately without scanning history.
+  /// Only active conversations with unread incoming messages scan recent
+  /// unread candidates (bounded to 50), breaking at the first read row.
   Future<List<ConversationSummary>> fetchMyConversationSummaries(
     String myId,
   ) async {
@@ -223,25 +220,16 @@ class ConversationRepository {
       if (conversations.isEmpty) return const [];
 
       final conversationIds = conversations.map((c) => c.id).toList();
-      final results = await Future.wait<dynamic>([
-        _fetchDirectProfilesByConversation(
-          conversationIds: conversationIds,
-          myId: myId,
-        ),
-        _fetchUnreadCountsByConversation(
-          conversationIds: conversationIds,
-          myId: myId,
-        ),
-      ]);
-
-      final profilesByConversation = results[0] as Map<String, Profile?>;
-      final unreadCounts = results[1] as Map<String, int>;
+      final profilesByConversation = await _fetchDirectProfilesByConversation(
+        conversationIds: conversationIds,
+        myId: myId,
+      );
 
       final summaries = await Future.wait(conversations.map((conversation) {
         return _fetchSummary(
           conversation: conversation,
           otherProfile: profilesByConversation[conversation.id],
-          unreadCount: unreadCounts[conversation.id] ?? 0,
+          myId: myId,
         );
       }));
 
@@ -283,54 +271,79 @@ class ConversationRepository {
     return profiles;
   }
 
-  /// Fetches unread candidates for all conversations in one request. The
-  /// per-message semantics are intentionally unchanged: an incoming message
-  /// is unread unless this user has a related status row with `read` status.
-  Future<Map<String, int>> _fetchUnreadCountsByConversation({
-    required List<String> conversationIds,
-    required String myId,
-  }) async {
-    final rows = await _client
-        .from('messages')
-        .select('conversation_id, message_status(user_id, status)')
-        .inFilter('conversation_id', conversationIds)
-        .neq('sender_id', myId);
-
-    final unreadCounts = <String, int>{};
-    for (final raw in rows as List) {
-      final row = raw as Map<String, dynamic>;
-      final conversationId = row['conversation_id'] as String;
-      final statusRows = (row['message_status'] as List?) ?? const [];
-      final isReadByMe = statusRows.any((s) {
-        final status = s as Map<String, dynamic>;
-        return status['user_id'] == myId && status['status'] == 'read';
-      });
-      if (!isReadByMe) {
-        unreadCounts[conversationId] = (unreadCounts[conversationId] ?? 0) + 1;
-      }
-    }
-    return unreadCounts;
-  }
-
   Future<ConversationSummary> _fetchSummary({
     required Conversation conversation,
     required Profile? otherProfile,
-    required int unreadCount,
+    required String myId,
   }) async {
     final lastMessageRow = await _client
         .from('messages')
-        .select()
+        .select('*, message_status(user_id, status)')
         .eq('conversation_id', conversation.id)
         .order('created_at', ascending: false)
         .limit(1)
         .maybeSingle();
 
+    Message? lastMessage;
+    var unreadCount = 0;
+
+    if (lastMessageRow != null) {
+      lastMessage = Message.fromJson(lastMessageRow);
+      final statusRows =
+          (lastMessageRow['message_status'] as List?) ?? const [];
+      final isFromMe = lastMessage.senderId == myId;
+      final isReadByMe = statusRows.any((s) {
+        final status = s as Map<String, dynamic>;
+        return status['user_id'] == myId && status['status'] == 'read';
+      });
+
+      // If the latest message is sent by me or already read by me, unread count is 0.
+      // Otherwise, scan recent unread messages in this conversation.
+      if (!isFromMe && !isReadByMe) {
+        unreadCount = await _countUnreadForConversation(
+          conversationId: conversation.id,
+          myId: myId,
+        );
+      }
+    }
+
     return ConversationSummary(
       conversation: conversation,
       otherProfile: conversation.isDirect ? otherProfile : null,
-      lastMessage:
-          lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
+      lastMessage: lastMessage,
       unreadCount: unreadCount,
     );
+  }
+
+  /// Counts unread incoming messages for a single conversation, scanning newest
+  /// to oldest with a bounded limit of 50. Stops as soon as a read message is encountered.
+  Future<int> _countUnreadForConversation({
+    required String conversationId,
+    required String myId,
+  }) async {
+    final rows = await _client
+        .from('messages')
+        .select('id, created_at, message_status(user_id, status)')
+        .eq('conversation_id', conversationId)
+        .neq('sender_id', myId)
+        .order('created_at', ascending: false)
+        .limit(50);
+
+    var count = 0;
+    for (final raw in rows as List) {
+      final row = raw as Map<String, dynamic>;
+      final statusRows = (row['message_status'] as List?) ?? const [];
+      final isRead = statusRows.any((s) {
+        final status = s as Map<String, dynamic>;
+        return status['user_id'] == myId && status['status'] == 'read';
+      });
+      if (isRead) {
+        // Chronological invariant: once an already-read message is reached,
+        // all older messages are also read.
+        break;
+      }
+      count++;
+    }
+    return count;
   }
 }

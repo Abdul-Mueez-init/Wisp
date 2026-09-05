@@ -19,13 +19,15 @@ import '../../location/providers/live_location_provider.dart';
 import '../../ai_agent/providers/ai_agent_provider.dart';
 import '../../calls/providers/call_controller.dart';
 import '../../../widgets/error_state_view.dart';
-// You may need to add this import if it's not exported elsewhere:
-// import '../providers/chat_messages_controller.dart';
 
 /// Phase 2 1-on-1 chat core, extended in Phase 3 to also render group
 /// conversations (plan.md: "Group chat detail screen (reuses chat core
 /// from Phase 2)") — same message stream/input, plus a group-aware app
 /// bar and sender-name labels on received bubbles.
+///
+/// Performance architecture: isolated sub-widgets (_ChatDetailAppBar,
+/// _ChatMessageList, _ChatLiveLocationBanner, _ChatInputArea) prevent
+/// typing/presence/send-state ticks from causing full screen and bubble rebuilds.
 class ChatDetailScreen extends ConsumerStatefulWidget {
   const ChatDetailScreen({
     super.key,
@@ -60,33 +62,11 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   // Perf fix (WISP_PERFORMANCE_HANDOFF.md §6) — tracks the newest
   // message id we've already run a read-receipt sync for, so a
   // `messages` stream emission that doesn't actually add a new
-  // incoming message (e.g. a translation or voice-transcript UPDATE
-  // on an existing row, or this user's own outgoing message) doesn't
-  // re-run markDelivered/markRead's several queries for nothing.
-  // Semantics are unchanged — every genuinely new message still gets
-  // synced, exactly as before.
+  // incoming message doesn't re-run read-receipt writes.
   String? _lastSyncedMessageId;
 
-  // WISP_STABILITY_AND_STORY_VIEWERS_HANDOFF.md Part A permanent fix:
-  // `ref` is invalid inside `dispose()` itself — the old `dispose()`
-  // below called `ref.read(...)` directly, which is exactly what
-  // produced "Bad state: Cannot use \"ref\" after the widget was
-  // disposed" on every single chat exit (this screen is disposed on
-  // one of the most common navigation actions in the whole app).
-  // `TypingController`/`LiveLocationController` (obtained via
-  // `.notifier`) are stable plain Dart objects for the *provider's*
-  // lifetime, not the widget's — caching them once in `initState()`
-  // (while `ref` is still valid) and calling methods on the cached
-  // instance later is safe and touches `ref` at zero point.
   TypingController? _typingController;
   LiveLocationController? _liveLocationController;
-
-  // The live-location-stop check needs the *current* sharing state at
-  // the moment of leaving the chat, which isn't safe to cache once in
-  // `initState()` (the user can start/stop live-location sharing at any
-  // point while the chat stays open). `build()` already watches this
-  // provider on every rebuild — mirroring that value here gives
-  // `deactivate()` a ref-free, always-current snapshot to read.
   LiveLocationSharingState? _lastLiveLocationState;
 
   @override
@@ -98,35 +78,35 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   }
 
   /// Only re-runs the sync if the newest message in the conversation
-  /// is one we haven't already synced. `ChatMessagesController`'s state
-  /// keeps `messages` ascending by `created_at` (same ordering the old
-  /// `watchMessages()` stream guaranteed), so `messages.last` is the
-  /// newest.
+  /// is one we haven't already synced.
   void _maybeSyncReadReceipts(List<Message> messages) {
     if (messages.isEmpty) return;
     final newestId = messages.last.id;
     if (newestId == _lastSyncedMessageId) return;
     _lastSyncedMessageId = newestId;
-    _syncReadReceipts();
+    _syncReadReceipts(messages);
   }
 
-  Future<void> _syncReadReceipts() async {
+  /// Bounded read-receipt update: passes the visible/loaded incoming message IDs
+  /// directly to `markRead()`, updating non-read status rows and inserting
+  /// missing ones without full-history scans or redundant markDelivered calls.
+  Future<void> _syncReadReceipts([List<Message>? messages]) async {
     final myId = ref.read(currentSessionProvider)?.user.id;
     if (myId == null) return;
     final repo = ref.read(messageRepositoryProvider);
-    await repo.markDelivered(conversationId: widget.conversationId, myId: myId);
-    await repo.markRead(conversationId: widget.conversationId, myId: myId);
+    final incomingIds = messages
+        ?.where((m) => m.senderId != myId)
+        .map((m) => m.id)
+        .toList();
+    await repo.markRead(
+      conversationId: widget.conversationId,
+      myId: myId,
+      messageIds: incomingIds,
+    );
   }
 
   @override
   void deactivate() {
-    // `deactivate()` runs earlier in Flutter's teardown sequence than
-    // `dispose()` — `ref` is still valid here, so this is the correct
-    // place for anything that needs *current* provider state at
-    // teardown time (Riverpod's documented "dispose() is too late"
-    // rule). Reinsertion within the same frame is a rare edge case not
-    // worth special-casing: nothing in Wisp's navigation graph moves
-    // `ChatDetailScreen` to another parent without disposing it.
     final liveState = _lastLiveLocationState;
     if (liveState != null &&
         liveState.isActive &&
@@ -138,424 +118,14 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
 
   @override
   void dispose() {
-    // Cached notifier reference only — zero `ref` access here. This
-    // used to call `ref.read(typingControllerProvider.notifier)`
-    // directly, which is exactly what produced "Cannot use \"ref\"
-    // after the widget was disposed" on every chat exit.
     _typingController?.stopTyping(widget.conversationId);
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final myId = ref.watch(currentSessionProvider)?.user.id;
-
-    // Phase D (WISP_PERFORMANCE_HANDOFF.md §11) — paginated window +
-    // scoped Realtime merge, replacing the old full-conversation
-    // `messagesStreamProvider` stream. See `ChatMessagesController`.
-    final chatState =
-        ref.watch(chatMessagesControllerProvider(widget.conversationId));
-    final sending = ref.watch(sendMessageControllerProvider).isLoading;
-
-    final liveLocationState = ref.watch(liveLocationControllerProvider);
-    // Part A fix: mirrored into a field on every build() so
-    // deactivate() has a ref-free, always-current snapshot to check
-    // against at teardown time — see deactivate()'s doc comment.
-    _lastLiveLocationState = liveLocationState;
-    final sharingLiveHere = liveLocationState.isActive &&
-        liveLocationState.conversationId == widget.conversationId;
-    final uploadingMedia =
-        ref.watch(sendMediaMessageControllerProvider).isLoading ||
-            ref.watch(sendLocationControllerProvider).isLoading;
-    // Only fetch the conversation row when we weren't handed one via
-    // `extra` (e.g. a deep link straight into a group chat).
-    final needsConversationFetch =
-        widget.otherProfile == null && widget.groupConversation == null;
-    final conversationAsync = needsConversationFetch
-        ? ref.watch(conversationByIdProvider(widget.conversationId))
-        : null;
-    final resolvedConversation =
-        widget.groupConversation ?? conversationAsync?.value;
-    final isGroup = resolvedConversation?.isGroup ?? false;
-
-    final otherProfileAsync =
-        (!isGroup && !widget.isAiConversation && widget.otherProfile == null)
-            ? ref.watch(otherDirectMemberProvider(widget.conversationId))
-            : null;
-    final displayProfile = widget.otherProfile ?? otherProfileAsync?.value;
-
-    final membersAsync =
-        isGroup ? ref.watch(groupMembersProvider(widget.conversationId)) : null;
-    final senderNames = <String, String>{
-      for (final m in membersAsync?.value ?? const [])
-        m.profile.id: m.profile.displayName?.isNotEmpty == true
-            ? m.profile.displayName!
-            : '@${m.profile.username}',
-    };
-
-    ref.listen(chatMessagesControllerProvider(widget.conversationId),
-        (prev, next) {
-      _maybeSyncReadReceipts(next.messages);
-    });
-
-    // Phase 4 — presence (direct chats only; groups have no single
-    // "other user" to show a dot for) and typing, for both chat types.
-    // Perf fix (WISP_PERFORMANCE_HANDOFF.md §10) — reads from the
-    // centralized `presenceByIdProvider` map (one app-wide realtime
-    // source) instead of opening a dedicated per-user stream for this
-    // screen. Same fallback behavior as before: until presence data is
-    // available for this user, falls back to the static
-    // `displayProfile` passed in via navigation.
-    final centralPresence = (!isGroup && displayProfile != null)
-        ? ref.watch(presenceByIdProvider.select((m) => m[displayProfile.id]))
-        : null;
-    final isOnline = centralPresence?.isOnline ?? displayProfile?.isOnline;
-    final lastSeenAt =
-        centralPresence?.lastSeenAt ?? displayProfile?.lastSeenAt;
-
-    final typingUserIds =
-        ref.watch(typingUsersStreamProvider(widget.conversationId)).value ??
-            const [];
-
-    final aiThinking =
-        ref.watch(aiAgentThinkingProvider(widget.conversationId));
-    final subtitleText = widget.isAiConversation && aiThinking
-        ? 'Wisp is typing…'
-        : _subtitleText(
-            isGroup: isGroup,
-            typingUserIds: typingUserIds,
-            senderNames: senderNames,
-            isOnline: isOnline,
-            lastSeenAt: lastSeenAt,
-            aiThinking: aiThinking,
-          );
-
-    return Scaffold(
-      backgroundColor: AppColors.backgroundBase,
-      appBar: AppBar(
-        titleSpacing: 0,
-        title: InkWell(
-          onTap: isGroup
-              ? () => context.push('/group/${widget.conversationId}/members')
-              : null,
-          child: Row(
-            children: [
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  CircleAvatar(
-                    radius: 18,
-                    backgroundColor: widget.isAiConversation
-                        ? AppColors.primaryContainer
-                        : AppColors.surfaceContainerHigh,
-                    child: widget.isAiConversation
-                        ? const Icon(Icons.auto_awesome,
-                            size: 18, color: AppColors.primary)
-                        : Text(
-                            _titleInitial(
-                                isGroup, resolvedConversation, displayProfile),
-                            style: const TextStyle(color: AppColors.primary),
-                          ),
-                  ),
-                  // design.md "Status & Indicators — Online Dot": 8px
-                  // solid circle in Moderate Green.
-                  if (!isGroup && !widget.isAiConversation && isOnline == true)
-                    Positioned(
-                      right: -1,
-                      bottom: -1,
-                      child: Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: AppColors.primary,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: AppColors.backgroundBase,
-                            width: 1.5,
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      widget.isAiConversation
-                          ? 'Wisp AI'
-                          : _titleText(
-                              isGroup, resolvedConversation, displayProfile),
-                      style: Theme.of(context).textTheme.titleMedium,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (subtitleText != null)
-                      Text(
-                        subtitleText,
-                        style:
-                            Theme.of(context).textTheme.labelMedium?.copyWith(
-                                  color: typingUserIds.isNotEmpty || aiThinking
-                                      ? AppColors.primary
-                                      : AppColors.onSurfaceVariant,
-                                ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                  ],
-                ),
-              ),
-              if (isGroup)
-                const Icon(Icons.chevron_right, color: AppColors.outline),
-            ],
-          ),
-        ),
-        // Phase 10, Batch 10c — call icons per design.md's Chat Detail
-        // 1-on-1 Stitch export (video then phone, right-aligned).
-        // 1-on-1 only per PRD.md §11: hidden for groups and the AI
-        // conversation, and only shown once the other member's id is
-        // known (needed for CallController.startCall's calleeId).
-        actions: (!isGroup &&
-                !widget.isAiConversation &&
-                displayProfile != null)
-            ? [
-                IconButton(
-                  tooltip: 'Video call',
-                  icon: const Icon(Icons.videocam_outlined),
-                  onPressed: () => _startCall(displayProfile, isVideo: true),
-                ),
-                IconButton(
-                  tooltip: 'Voice call',
-                  icon: const Icon(Icons.call_outlined),
-                  onPressed: () => _startCall(displayProfile, isVideo: false),
-                ),
-              ]
-            : null,
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: Builder(
-              builder: (context) {
-                if (chatState.isLoadingInitial) {
-                  return const Center(
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  );
-                }
-                if (chatState.messages.isEmpty && chatState.error != null) {
-                  // Phase 11 polish: friendly copy + retry instead of
-                  // the raw exception. Invalidating the (autoDispose)
-                  // controller re-runs its initial load from scratch.
-                  return ErrorStateView(
-                    error: chatState.error!,
-                    onRetry: () => ref.invalidate(
-                      chatMessagesControllerProvider(widget.conversationId),
-                    ),
-                  );
-                }
-                if (chatState.messages.isEmpty) {
-                  if (widget.isAiConversation) {
-                    return _AiWelcomeView(
-                      onSuggestionTap: (text) => ref
-                          .read(sendMessageControllerProvider.notifier)
-                          .sendText(
-                            conversationId: widget.conversationId,
-                            content: text,
-                            isAiConversation: true,
-                          ),
-                    );
-                  }
-                  return Center(
-                    child: Text(
-                      'Say hi 👋',
-                      style: Theme.of(context).textTheme.bodyMedium,
-                    ),
-                  );
-                }
-                final reversed = chatState.messages.reversed.toList();
-                return NotificationListener<ScrollNotification>(
-                  // Phase D (WISP_PERFORMANCE_HANDOFF.md §11) — with
-                  // `reverse: true`, `pixels` approaching
-                  // `maxScrollExtent` is the user scrolling *up* toward
-                  // the oldest loaded message: exactly the moment the
-                  // next page needs to be fetched and prepended.
-                  onNotification: (notification) {
-                    final metrics = notification.metrics;
-                    if (metrics.maxScrollExtent > 0 &&
-                        metrics.pixels >= metrics.maxScrollExtent - 600) {
-                      ref
-                          .read(chatMessagesControllerProvider(
-                                  widget.conversationId)
-                              .notifier)
-                          .loadOlder();
-                    }
-                    return false;
-                  },
-                  child: ListView.builder(
-                    reverse: true,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: AppSpacing.pageMargin,
-                      vertical: 12,
-                    ),
-                    itemCount:
-                        reversed.length + (chatState.isLoadingMore ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (index == reversed.length) {
-                        // Older-page loading footer — sits at the far
-                        // (off-screen) end of the reversed list, so it
-                        // never shifts the currently visible bubbles.
-                        return const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 16),
-                          child: Center(
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                        );
-                      }
-                      final Message message = reversed[index];
-                      final isMine = message.senderId == myId;
-                      // Status is no longer looked up here — MessageBubble's
-                      // leaf `_StatusTick` resolves it itself via the
-                      // indexed `messageStatusByIdProvider`, so a status
-                      // update no longer has to rebuild this whole list.
-                      final senderLabel =
-                          (isGroup && !isMine && message.senderId != null)
-                              ? senderNames[message.senderId]
-                              : null;
-                      return MessageBubble(
-                        key: ValueKey(message.id),
-                        message: message,
-                        isMine: isMine,
-                        senderLabel: senderLabel,
-                      );
-                    },
-                  ),
-                );
-              },
-            ),
-          ),
-          if (sharingLiveHere)
-            Container(
-              width: double.infinity,
-              color: AppColors.primaryContainer,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.pageMargin, vertical: 8),
-              child: Row(
-                children: [
-                  const Icon(Icons.location_on,
-                      size: 16, color: AppColors.cream),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Sharing live location',
-                      style: Theme.of(context)
-                          .textTheme
-                          .labelMedium
-                          ?.copyWith(color: AppColors.cream),
-                    ),
-                  ),
-                  TextButton(
-                    onPressed: () => ref
-                        .read(liveLocationControllerProvider.notifier)
-                        .stop(),
-                    child: const Text('Stop',
-                        style: TextStyle(color: AppColors.cream)),
-                  ),
-                ],
-              ),
-            ),
-          ChatInputBar(
-            sending: sending,
-            uploadingMedia: uploadingMedia,
-            onSend: (text) =>
-                ref.read(sendMessageControllerProvider.notifier).sendText(
-                      conversationId: widget.conversationId,
-                      content: text,
-                      isAiConversation: widget.isAiConversation,
-                    ),
-            onTextChanged: (text) => ref
-                .read(typingControllerProvider.notifier)
-                .onTextChanged(widget.conversationId, text),
-            onSendImage: (bytes, ext) => _sendMedia(
-              () => ref
-                  .read(sendMediaMessageControllerProvider.notifier)
-                  .sendImage(
-                    conversationId: widget.conversationId,
-                    bytes: bytes,
-                    fileExt: ext,
-                  ),
-            ),
-            onSendVideo: (bytes, ext) => _sendMedia(
-              () => ref
-                  .read(sendMediaMessageControllerProvider.notifier)
-                  .sendVideo(
-                    conversationId: widget.conversationId,
-                    bytes: bytes,
-                    fileExt: ext,
-                  ),
-            ),
-            onSendDocument: (bytes, fileName) => _sendMedia(
-              () => ref
-                  .read(sendMediaMessageControllerProvider.notifier)
-                  .sendDocument(
-                    conversationId: widget.conversationId,
-                    bytes: bytes,
-                    fileName: fileName,
-                  ),
-            ),
-            onSendVoice: (bytes) => _sendMedia(
-              () => ref
-                  .read(sendMediaMessageControllerProvider.notifier)
-                  .sendVoice(
-                    conversationId: widget.conversationId,
-                    bytes: bytes,
-                  ),
-            ),
-            onShareContact: (profile) => _sendMedia(
-              () =>
-                  ref.read(sendMessageControllerProvider.notifier).sendContact(
-                        conversationId: widget.conversationId,
-                        sharedContactId: profile.id,
-                      ),
-            ),
-            onSendCurrentLocation: () => _sendMedia(
-              () => ref
-                  .read(sendLocationControllerProvider.notifier)
-                  .sendCurrentLocation(conversationId: widget.conversationId),
-              readError: () => ref.read(sendLocationControllerProvider).error,
-            ),
-            onStartLiveLocation: _startLiveLocation,
-          ),
-        ],
-      ),
-    );
+  void _onLiveLocationStateChanged(LiveLocationSharingState state) {
+    _lastLiveLocationState = state;
   }
 
-  /// Shared error-surfacing wrapper for every Phase 5 media send —
-  /// avoids repeating "await, check ok, read error, show snackbar"
-  /// three times over (image/video/document).
-  Future<void> _sendMedia(
-    Future<bool> Function() send, {
-    Object? Function()? readError,
-  }) async {
-    final ok = await send();
-    if (!ok && mounted) {
-      final error = readError != null
-          ? readError()
-          : ref.read(sendMediaMessageControllerProvider).error;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error?.toString() ?? 'Could not send attachment.'),
-          backgroundColor: AppColors.error,
-        ),
-      );
-    }
-  }
-
-  /// Places a call from this chat's call/video icons. `CallController`
-  /// itself refuses to start a second call if one's already active on
-  /// this device (returns false, state untouched) — that failure and a
-  /// genuine start failure look the same here, both just don't push.
   Future<void> _startCall(Profile otherProfile, {required bool isVideo}) async {
     if (!ref.read(callControllerProvider).isIdle) return;
     context.push('/call');
@@ -589,8 +159,213 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     }
   }
 
-  /// Phase 4 subtitle line shown under the title: typing takes priority
-  /// over presence, since it's more immediately relevant.
+  @override
+  Widget build(BuildContext context) {
+    final myId = ref.watch(currentSessionProvider)?.user.id;
+
+    // Listen to message window events to sync read receipts
+    ref.listen(chatMessagesControllerProvider(widget.conversationId),
+        (prev, next) {
+      _maybeSyncReadReceipts(next.messages);
+    });
+
+    return Scaffold(
+      backgroundColor: AppColors.backgroundBase,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(kToolbarHeight),
+        child: _ChatDetailAppBar(
+          conversationId: widget.conversationId,
+          otherProfile: widget.otherProfile,
+          groupConversation: widget.groupConversation,
+          isAiConversation: widget.isAiConversation,
+          onStartCall: _startCall,
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: _ChatMessageList(
+              conversationId: widget.conversationId,
+              isAiConversation: widget.isAiConversation,
+              myId: myId,
+            ),
+          ),
+          _ChatLiveLocationBanner(
+            conversationId: widget.conversationId,
+            onStateChanged: _onLiveLocationStateChanged,
+          ),
+          _ChatInputArea(
+            conversationId: widget.conversationId,
+            isAiConversation: widget.isAiConversation,
+            onStartLiveLocation: _startLiveLocation,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Isolated App Bar: watches typing, presence, group members, and thinking state.
+/// Typing/presence updates rebuild ONLY this bar, leaving message bubbles untouched.
+class _ChatDetailAppBar extends ConsumerWidget {
+  const _ChatDetailAppBar({
+    required this.conversationId,
+    required this.otherProfile,
+    required this.groupConversation,
+    required this.isAiConversation,
+    required this.onStartCall,
+  });
+
+  final String conversationId;
+  final Profile? otherProfile;
+  final Conversation? groupConversation;
+  final bool isAiConversation;
+  final Future<void> Function(Profile otherProfile, {required bool isVideo})
+      onStartCall;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final needsConversationFetch =
+        otherProfile == null && groupConversation == null;
+    final conversationAsync = needsConversationFetch
+        ? ref.watch(conversationByIdProvider(conversationId))
+        : null;
+    final resolvedConversation =
+        groupConversation ?? conversationAsync?.value;
+    final isGroup = resolvedConversation?.isGroup ?? false;
+
+    final otherProfileAsync =
+        (!isGroup && !isAiConversation && otherProfile == null)
+            ? ref.watch(otherDirectMemberProvider(conversationId))
+            : null;
+    final displayProfile = otherProfile ?? otherProfileAsync?.value;
+
+    final membersAsync =
+        isGroup ? ref.watch(groupMembersProvider(conversationId)) : null;
+    final senderNames = <String, String>{
+      for (final m in membersAsync?.value ?? const [])
+        m.profile.id: m.profile.displayName?.isNotEmpty == true
+            ? m.profile.displayName!
+            : '@${m.profile.username}',
+    };
+
+    final centralPresence = (!isGroup && displayProfile != null)
+        ? ref.watch(presenceByIdProvider.select((m) => m[displayProfile.id]))
+        : null;
+    final isOnline = centralPresence?.isOnline ?? displayProfile?.isOnline;
+    final lastSeenAt =
+        centralPresence?.lastSeenAt ?? displayProfile?.lastSeenAt;
+
+    final typingUserIds =
+        ref.watch(typingUsersStreamProvider(conversationId)).value ??
+            const [];
+
+    final aiThinking =
+        ref.watch(aiAgentThinkingProvider(conversationId));
+    final subtitleText = isAiConversation && aiThinking
+        ? 'Wisp is typing…'
+        : _subtitleText(
+            isGroup: isGroup,
+            typingUserIds: typingUserIds,
+            senderNames: senderNames,
+            isOnline: isOnline,
+            lastSeenAt: lastSeenAt,
+            aiThinking: aiThinking,
+          );
+
+    return AppBar(
+      titleSpacing: 0,
+      title: InkWell(
+        onTap: isGroup
+            ? () => context.push('/group/$conversationId/members')
+            : null,
+        child: Row(
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                CircleAvatar(
+                  radius: 18,
+                  backgroundColor: isAiConversation
+                      ? AppColors.primaryContainer
+                      : AppColors.surfaceContainerHigh,
+                  child: isAiConversation
+                      ? const Icon(Icons.auto_awesome,
+                          size: 18, color: AppColors.primary)
+                      : Text(
+                          _titleInitial(
+                              isGroup, resolvedConversation, displayProfile),
+                          style: const TextStyle(color: AppColors.primary),
+                        ),
+                ),
+                if (!isGroup && !isAiConversation && isOnline == true)
+                  Positioned(
+                    right: -1,
+                    bottom: -1,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: AppColors.primary,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: AppColors.backgroundBase,
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    isAiConversation
+                        ? 'Wisp AI'
+                        : _titleText(
+                            isGroup, resolvedConversation, displayProfile),
+                    style: Theme.of(context).textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  if (subtitleText != null)
+                    Text(
+                      subtitleText,
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                            color: typingUserIds.isNotEmpty || aiThinking
+                                ? AppColors.primary
+                                : AppColors.onSurfaceVariant,
+                          ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
+            ),
+            if (isGroup)
+              const Icon(Icons.chevron_right, color: AppColors.outline),
+          ],
+        ),
+      ),
+      actions: (!isGroup && !isAiConversation && displayProfile != null)
+          ? [
+              IconButton(
+                tooltip: 'Video call',
+                icon: const Icon(Icons.videocam_outlined),
+                onPressed: () => onStartCall(displayProfile, isVideo: true),
+              ),
+              IconButton(
+                tooltip: 'Voice call',
+                icon: const Icon(Icons.call_outlined),
+                onPressed: () => onStartCall(displayProfile, isVideo: false),
+              ),
+            ]
+          : null,
+    );
+  }
+
   String? _subtitleText({
     required bool isGroup,
     required List<String> typingUserIds,
@@ -610,7 +385,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
           ? '$names and others typing…'
           : '$names typing…';
     }
-    if (isGroup) return null; // no per-group presence concept (ERD.md)
+    if (isGroup) return null;
     if (isOnline == true) return 'online';
     if (lastSeenAt != null) return _lastSeenLabel(lastSeenAt);
     return null;
@@ -647,14 +422,292 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   }
 }
 
+/// Isolated Message List: watches only chatMessagesControllerProvider.
+/// List indexing is computed as `messages.length - 1 - index` directly,
+/// avoiding `.reversed.toList()` allocations on every frame.
+class _ChatMessageList extends ConsumerWidget {
+  const _ChatMessageList({
+    required this.conversationId,
+    required this.isAiConversation,
+    required this.myId,
+  });
+
+  final String conversationId;
+  final bool isAiConversation;
+  final String? myId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final chatState = ref.watch(chatMessagesControllerProvider(conversationId));
+
+    if (chatState.isLoadingInitial) {
+      return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    }
+
+    if (chatState.messages.isEmpty && chatState.error != null) {
+      return ErrorStateView(
+        error: chatState.error!,
+        onRetry: () => ref.invalidate(
+          chatMessagesControllerProvider(conversationId),
+        ),
+      );
+    }
+
+    if (chatState.messages.isEmpty) {
+      if (isAiConversation) {
+        return _AiWelcomeView(
+          onSuggestionTap: (text) => ref
+              .read(sendMessageControllerProvider.notifier)
+              .sendText(
+                conversationId: conversationId,
+                content: text,
+                isAiConversation: true,
+              ),
+        );
+      }
+      return Center(
+        child: Text(
+          'Say hi 👋',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+      );
+    }
+
+    final messages = chatState.messages;
+    final messagesCount = messages.length;
+
+    // Member names for group chats
+    final groupMembers = ref.watch(
+      groupMembersProvider(conversationId).select((m) => m.value),
+    );
+    final senderNames = <String, String>{
+      for (final m in groupMembers ?? const [])
+        m.profile.id: m.profile.displayName?.isNotEmpty == true
+            ? m.profile.displayName!
+            : '@${m.profile.username}',
+    };
+
+    return NotificationListener<ScrollNotification>(
+      onNotification: (notification) {
+        final metrics = notification.metrics;
+        if (metrics.maxScrollExtent > 0 &&
+            metrics.pixels >= metrics.maxScrollExtent - 600) {
+          ref
+              .read(chatMessagesControllerProvider(conversationId).notifier)
+              .loadOlder();
+        }
+        return false;
+      },
+      child: ListView.builder(
+        reverse: true,
+        padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.pageMargin,
+          vertical: 12,
+        ),
+        itemCount: messagesCount + (chatState.isLoadingMore ? 1 : 0),
+        itemBuilder: (context, index) {
+          if (index == messagesCount) {
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Center(
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            );
+          }
+          // Zero-allocation reversed index into oldest-first collection
+          final Message message = messages[messagesCount - 1 - index];
+          final isMine = message.senderId == myId;
+          final senderLabel = (!isMine && message.senderId != null)
+              ? senderNames[message.senderId]
+              : null;
+
+          return MessageBubble(
+            key: ValueKey(message.id),
+            message: message,
+            isMine: isMine,
+            senderLabel: senderLabel,
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Isolated Live Location Banner: rebuilds only when live location state changes.
+class _ChatLiveLocationBanner extends ConsumerWidget {
+  const _ChatLiveLocationBanner({
+    required this.conversationId,
+    required this.onStateChanged,
+  });
+
+  final String conversationId;
+  final ValueChanged<LiveLocationSharingState> onStateChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final liveLocationState = ref.watch(liveLocationControllerProvider);
+    onStateChanged(liveLocationState);
+
+    final sharingLiveHere = liveLocationState.isActive &&
+        liveLocationState.conversationId == conversationId;
+
+    if (!sharingLiveHere) return const SizedBox.shrink();
+
+    return Container(
+      width: double.infinity,
+      color: AppColors.primaryContainer,
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.pageMargin,
+        vertical: 8,
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.location_on, size: 16, color: AppColors.cream),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Sharing live location',
+              style: Theme.of(context)
+                  .textTheme
+                  .labelMedium
+                  ?.copyWith(color: AppColors.cream),
+            ),
+          ),
+          TextButton(
+            onPressed: () =>
+                ref.read(liveLocationControllerProvider.notifier).stop(),
+            child: const Text('Stop',
+                style: TextStyle(color: AppColors.cream)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Isolated Input Area: rebuilds only when sending or uploading state changes.
+class _ChatInputArea extends ConsumerWidget {
+  const _ChatInputArea({
+    required this.conversationId,
+    required this.isAiConversation,
+    required this.onStartLiveLocation,
+  });
+
+  final String conversationId;
+  final bool isAiConversation;
+  final Future<void> Function(LiveLocationDuration) onStartLiveLocation;
+
+  Future<void> _sendMedia(
+    BuildContext context,
+    WidgetRef ref,
+    Future<bool> Function() send, {
+    Object? Function()? readError,
+  }) async {
+    final ok = await send();
+    if (!ok && context.mounted) {
+      final error = readError != null
+          ? readError()
+          : ref.read(sendMediaMessageControllerProvider).error;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error?.toString() ?? 'Could not send attachment.'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final sending = ref.watch(
+      sendMessageControllerProvider.select((s) => s.isLoading),
+    );
+    final uploadingMedia = ref.watch(
+          sendMediaMessageControllerProvider.select((s) => s.isLoading),
+        ) ||
+        ref.watch(
+          sendLocationControllerProvider.select((s) => s.isLoading),
+        );
+
+    return ChatInputBar(
+      sending: sending,
+      uploadingMedia: uploadingMedia,
+      onSend: (text) =>
+          ref.read(sendMessageControllerProvider.notifier).sendText(
+                conversationId: conversationId,
+                content: text,
+                isAiConversation: isAiConversation,
+              ),
+      onTextChanged: (text) => ref
+          .read(typingControllerProvider.notifier)
+          .onTextChanged(conversationId, text),
+      onSendImage: (bytes, ext) => _sendMedia(
+        context,
+        ref,
+        () => ref
+            .read(sendMediaMessageControllerProvider.notifier)
+            .sendImage(
+              conversationId: conversationId,
+              bytes: bytes,
+              fileExt: ext,
+            ),
+      ),
+      onSendVideo: (bytes, ext) => _sendMedia(
+        context,
+        ref,
+        () => ref
+            .read(sendMediaMessageControllerProvider.notifier)
+            .sendVideo(
+              conversationId: conversationId,
+              bytes: bytes,
+              fileExt: ext,
+            ),
+      ),
+      onSendDocument: (bytes, fileName) => _sendMedia(
+        context,
+        ref,
+        () => ref
+            .read(sendMediaMessageControllerProvider.notifier)
+            .sendDocument(
+              conversationId: conversationId,
+              bytes: bytes,
+              fileName: fileName,
+            ),
+      ),
+      onSendVoice: (bytes) => _sendMedia(
+        context,
+        ref,
+        () => ref
+            .read(sendMediaMessageControllerProvider.notifier)
+            .sendVoice(
+              conversationId: conversationId,
+              bytes: bytes,
+            ),
+      ),
+      onShareContact: (profile) => _sendMedia(
+        context,
+        ref,
+        () => ref
+            .read(sendMessageControllerProvider.notifier)
+            .sendContact(
+              conversationId: conversationId,
+              sharedContactId: profile.id,
+            ),
+      ),
+      onSendCurrentLocation: () => _sendMedia(
+        context,
+        ref,
+        () => ref
+            .read(sendLocationControllerProvider.notifier)
+            .sendCurrentLocation(conversationId: conversationId),
+        readError: () => ref.read(sendLocationControllerProvider).error,
+      ),
+      onStartLiveLocation: onStartLiveLocation,
+    );
+  }
+}
+
 /// Phase 8 — shown only when the AI conversation has zero messages yet
-/// (the same screen switches to the ordinary bubble list the moment a
-/// first message exists, per `chatMessagesControllerProvider`'s live
-/// state — no separate route). Mirrors WhatsApp's "Ask Meta AI" landing screen:
-/// a greeting plus a handful of tappable suggestions that send
-/// immediately as the first message, using the exact same
-/// `SendMessageController.sendText(isAiConversation: true)` path a
-/// typed message would use — this widget only supplies the text.
 class _AiWelcomeView extends StatelessWidget {
   const _AiWelcomeView({required this.onSuggestionTap});
 

@@ -38,14 +38,12 @@ import '../theme/app_theme.dart';
 /// no new colors, and the `_index`/`_builtIndexes`/`IndexedStack` logic
 /// above is untouched.
 ///
-/// Jazz-World glass pass (this session) — `extendBody: true` added so
-/// the pill nav shows real, blurred app content behind it instead of a
-/// solid strip (see `_PillNavBar`'s doc comment). The only change in
-/// *this* build method beyond that flag is the `MediaQuery` wrapper
-/// around `IndexedStack`, which pads every tab's ambient bottom safe
-/// area by `kFloatingNavClearance` so nested Scaffolds/FABs
-/// automatically clear the floating pill. `_index`/`_builtIndexes`
-/// selection logic is still untouched.
+/// Jazz-World glass pass — `extendBody: true` added so the pill nav
+/// shows real, blurred app content behind it instead of a solid strip.
+///
+/// Phase 7 optimization: wraps the body IndexedStack and floating pill
+/// in separate `RepaintBoundary` widgets to isolate the GPU blur
+/// layer compositing, avoiding repeated full-screen rasterization.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -79,23 +77,6 @@ class _AppShellState extends State<AppShell> {
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
     return Scaffold(
-      // `extendBody: true` is what makes the pill nav genuinely glass —
-      // without it, the outer Scaffold reserves a solid, opaque strip
-      // for `bottomNavigationBar` and there's nothing real behind the
-      // pill to blur, which is why the previous pass could only fake a
-      // frosted look. With it, each tab's real content now runs the
-      // full height of the screen, underneath the floating pill.
-      //
-      // That means each tab screen needs to reserve `kFloatingNavClearance`
-      // of trailing scroll space itself so its last item isn't
-      // permanently hidden under the pill — done via the MediaQuery
-      // override below, which every nested Scaffold (no bottomNavigationBar
-      // of its own) and its FloatingActionButton already respect
-      // automatically, plus an explicit bottom-padding line added to
-      // each of the four tab screens' own scrollables (chat_list_screen.dart,
-      // status_list_screen.dart, calls_tab_screen.dart,
-      // profile_settings_screen.dart) so their content — not just the
-      // FAB — clears the glass pill correctly.
       extendBody: true,
       body: MediaQuery(
         data: mq.copyWith(
@@ -103,17 +84,21 @@ class _AppShellState extends State<AppShell> {
             bottom: mq.padding.bottom + kFloatingNavClearance,
           ),
         ),
-        child: IndexedStack(
-          index: _index,
-          children: [
-            for (var i = 0; i < _screens.length; i++)
-              _builtIndexes.contains(i) ? _screens[i] : const SizedBox.shrink(),
-          ],
+        child: RepaintBoundary(
+          child: IndexedStack(
+            index: _index,
+            children: [
+              for (var i = 0; i < _screens.length; i++)
+                _builtIndexes.contains(i) ? _screens[i] : const SizedBox.shrink(),
+            ],
+          ),
         ),
       ),
-      bottomNavigationBar: _PillNavBar(
-        selectedIndex: _index,
-        onSelect: _onDestinationSelected,
+      bottomNavigationBar: RepaintBoundary(
+        child: _PillNavBar(
+          selectedIndex: _index,
+          onSelect: _onDestinationSelected,
+        ),
       ),
     );
   }
@@ -124,29 +109,6 @@ class _AppShellState extends State<AppShell> {
 /// above the page margin. The outer shape (floating stadium, full
 /// corner radius, glass blur) is the hand-built `Container`/`ClipRRect`/
 /// `BackdropFilter` stack from the earlier pass — untouched here.
-///
-/// This pass fixes what the stock Material 3 `NavigationBar` (previous
-/// attempt) structurally can't do: in the reference, the selected tab's
-/// highlight is one shape that **encloses both the icon and its label
-/// together** (icon on top, label underneath, both inside the same
-/// rounded highlight) — not a circle behind the icon with the label
-/// sitting outside/below it. `NavigationBar`'s `indicatorShape` only
-/// ever wraps the icon slot by design; there's no supported way to
-/// stretch that indicator down to cover the label too. So the items are
-/// back to a small hand-built `_PillNavItem`, this time laid out as an
-/// icon-over-label `Column` (not the very first pass's icon-beside-
-/// label `Row`, which is what caused the earlier overflow bug) — same
-/// available width as before, just stacked instead of side-by-side, so
-/// there's no overflow risk reintroduced.
-///
-/// Note on "circular": the highlight here is a rounded rectangle
-/// (`AppRadius.xl`, 16px corners) sized to fit its content
-/// (`mainAxisSize.min`, not stretched to the cell's full width) rather
-/// than a literal circle — a true circle can't cleanly contain a
-/// two-line, non-square icon+label group without a lot of dead space
-/// around it. Visually this reads as the same soft, all-corners-rounded
-/// "blob" the reference uses; it just isn't mathematically circular,
-/// which a plain `CircleBorder` couldn't be while still holding text.
 class _PillNavBar extends StatelessWidget {
   const _PillNavBar({required this.selectedIndex, required this.onSelect});
 
@@ -237,10 +199,6 @@ class _PillNavItem extends StatelessWidget {
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Center(
-        // `Center` + `mainAxisSize: min` below (not `Expanded`'s full
-        // cell width) so the highlight hugs just the icon+label content,
-        // matching the reference's snug pill rather than stretching
-        // edge-to-edge across this tab's quarter of the bar.
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,

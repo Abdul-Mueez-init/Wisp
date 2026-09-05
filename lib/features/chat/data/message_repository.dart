@@ -403,16 +403,33 @@ class MessageRepository {
   /// themselves — required by the `message_status_insert_own` RLS
   /// policy) for any message in [conversationId] not sent by [myId]
   /// that doesn't already have a status row from [myId].
+  ///
+  /// Bounded: operates on [messageIds] if provided, or the most recent
+  /// 50 incoming messages in the conversation, avoiding unbounded historical
+  /// scans.
   Future<void> markDelivered({
     required String conversationId,
     required String myId,
+    List<String>? messageIds,
   }) async {
     try {
-      final incoming = await _incomingMessageIds(conversationId, myId);
-      if (incoming.isEmpty) return;
+      List<String> targetIds;
+      if (messageIds != null && messageIds.isNotEmpty) {
+        targetIds = messageIds;
+      } else {
+        final rows = await _client
+            .from('messages')
+            .select('id')
+            .eq('conversation_id', conversationId)
+            .neq('sender_id', myId)
+            .order('created_at', ascending: false)
+            .limit(50);
+        targetIds = (rows as List).map((r) => r['id'] as String).toList();
+      }
+      if (targetIds.isEmpty) return;
 
-      final alreadyTracked = await _trackedMessageIds(incoming, myId);
-      final toInsert = incoming
+      final alreadyTracked = await _trackedMessageIds(targetIds, myId);
+      final toInsert = targetIds
           .where((id) => !alreadyTracked.contains(id))
           .map((id) => {
                 'message_id': id,
@@ -429,29 +446,65 @@ class MessageRepository {
     }
   }
 
-  /// Upgrades every incoming message's status to 'read' for [myId] —
-  /// updates existing rows (e.g. 'delivered' → 'read') and inserts any
-  /// still-missing rows directly as 'read'.
+  /// Upgrades incoming messages to 'read' for [myId] — updates existing
+  /// non-read rows (e.g. 'delivered' → 'read') and inserts any missing
+  /// rows directly as 'read'.
+  ///
+  /// Bounded: operates on [messageIds] if passed (e.g. visible window),
+  /// or recent 50 incoming messages. Never scans complete conversation history.
+  /// Skips rows that are already marked 'read' to avoid redundant updates
+  /// and cascading realtime emissions.
   Future<void> markRead({
     required String conversationId,
     required String myId,
+    List<String>? messageIds,
   }) async {
     try {
-      final incoming = await _incomingMessageIds(conversationId, myId);
-      if (incoming.isEmpty) return;
+      List<String> targetIds;
+      if (messageIds != null && messageIds.isNotEmpty) {
+        targetIds = messageIds;
+      } else {
+        final rows = await _client
+            .from('messages')
+            .select('id')
+            .eq('conversation_id', conversationId)
+            .neq('sender_id', myId)
+            .order('created_at', ascending: false)
+            .limit(50);
+        targetIds = (rows as List).map((r) => r['id'] as String).toList();
+      }
+      if (targetIds.isEmpty) return;
 
-      await _client
+      final trackedRows = await _client
           .from('message_status')
-          .update({
-            'status': 'read',
-            'updated_at': DateTime.now().toIso8601String(),
-          })
+          .select('message_id, status')
           .eq('user_id', myId)
-          .inFilter('message_id', incoming);
+          .inFilter('message_id', targetIds);
 
-      final stillTracked = await _trackedMessageIds(incoming, myId);
-      final toInsert = incoming
-          .where((id) => !stillTracked.contains(id))
+      final statusByMsgId = <String, String>{
+        for (final r in trackedRows as List)
+          r['message_id'] as String: r['status'] as String,
+      };
+
+      // Only update rows that exist but are NOT 'read' (e.g. 'delivered' or 'sent')
+      final toUpdate = targetIds
+          .where((id) => statusByMsgId.containsKey(id) && statusByMsgId[id] != 'read')
+          .toList();
+
+      if (toUpdate.isNotEmpty) {
+        await _client
+            .from('message_status')
+            .update({
+              'status': 'read',
+              'updated_at': DateTime.now().toIso8601String(),
+            })
+            .eq('user_id', myId)
+            .inFilter('message_id', toUpdate);
+      }
+
+      // Only insert rows that don't exist at all for myId
+      final toInsert = targetIds
+          .where((id) => !statusByMsgId.containsKey(id))
           .map((id) => {'message_id': id, 'user_id': myId, 'status': 'read'})
           .toList();
 
@@ -461,18 +514,6 @@ class MessageRepository {
     } on PostgrestException catch (e) {
       throw SupabaseFailure(e.message);
     }
-  }
-
-  Future<List<String>> _incomingMessageIds(
-    String conversationId,
-    String myId,
-  ) async {
-    final rows = await _client
-        .from('messages')
-        .select('id')
-        .eq('conversation_id', conversationId)
-        .neq('sender_id', myId);
-    return (rows as List).map((r) => r['id'] as String).toList();
   }
 
   Future<Set<String>> _trackedMessageIds(

@@ -128,6 +128,8 @@ final myConversationSummariesProvider =
   var refreshInFlight = false;
   var refreshQueued = false;
 
+  late final void Function() scheduleRefresh;
+
   Future<void> refresh() async {
     if (refreshInFlight) {
       refreshQueued = true;
@@ -149,11 +151,11 @@ final myConversationSummariesProvider =
     }
   }
 
-  void scheduleRefresh() {
+  scheduleRefresh = () {
     if (controller.isClosed) return;
     debounce?.cancel();
     debounce = Timer(const Duration(milliseconds: 300), refresh);
-  }
+  };
 
   // Initial load — fires immediately, not debounced.
   unawaited(refresh());

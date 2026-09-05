@@ -164,21 +164,23 @@ class ChatMessagesController extends StateNotifier<ChatMessagesState> {
   /// Handles both a brand-new message (insert) and an existing row
   /// changing in place — Phase 7 translation, Phase 9 voice
   /// transcription/actions, live-location pin updates: all UPDATEs on a
-  /// row already in [state]'s list — with one code path: replace by id
-  /// if present, otherwise insert in sorted position. Sorted-insert
-  /// (rather than always "append at the end") matters because a live
-  /// insert event can in principle race a `loadOlder()` page that
-  /// hasn't resolved yet; landing in the right spot doesn't depend on
-  /// assuming arrival order.
+  /// row already in [state]'s list.
+  ///
+  /// Optimization: if an existing message row is unchanged, no-ops to avoid
+  /// triggering unneeded state notifications.
   void _upsert(Message message) {
-    final list = [...state.messages];
-    final index = list.indexWhere((m) => m.id == message.id);
+    final current = state.messages;
+    final index = current.indexWhere((m) => m.id == message.id);
     if (index != -1) {
+      if (current[index] == message) return;
+      final list = List<Message>.from(current);
       list[index] = message;
+      state = state.copyWith(messages: list);
     } else {
+      final list = List<Message>.from(current);
       list.insert(_sortedInsertIndex(list, message), message);
+      state = state.copyWith(messages: list);
     }
-    state = state.copyWith(messages: list);
   }
 
   int _sortedInsertIndex(List<Message> list, Message message) {
@@ -219,8 +221,10 @@ final chatMessagesControllerProvider = StateNotifierProvider.autoDispose
   );
 });
 
+/// Phase 4 optimization: auto-disposed when no widget is watching status ticks,
+/// preventing idle background status stream subscriptions.
 final messageStatusesStreamProvider =
-    StreamProvider<List<MessageStatus>>((ref) {
+    StreamProvider.autoDispose<List<MessageStatus>>((ref) {
   return ref.watch(messageRepositoryProvider).watchMyVisibleStatuses();
 });
 
@@ -231,7 +235,8 @@ final messageStatusesStreamProvider =
 /// `.select` so a status change only rebuilds the one bubble it
 /// belongs to, not the whole message list or screen. Same values,
 /// same semantics as before — just an O(1) lookup instead of O(n).
-final messageStatusByIdProvider = Provider<Map<String, MessageStatus>>((ref) {
+final messageStatusByIdProvider =
+    Provider.autoDispose<Map<String, MessageStatus>>((ref) {
   final statuses = ref.watch(messageStatusesStreamProvider).value ?? const [];
   return {for (final s in statuses) s.messageId: s};
 });
@@ -322,12 +327,6 @@ class SendMessageController extends AsyncNotifier<void> {
           .getOtherDirectMember(conversationId: conversationId, myId: myId);
       if (otherMember == null) return;
 
-      // Find the row we just inserted so we know which id to update.
-      // sendTextMessage doesn't return the new row's id today, so we
-      // look it up by (conversation, sender, content, most recent) —
-      // a small extra read, same "acceptable at demo scale" reasoning
-      // already used elsewhere (e.g. MediaRepository's extra list()
-      // call, per context.md).
       final justSent =
           await ref.read(messageRepositoryProvider).findMostRecentTextMessage(
                 conversationId: conversationId,
@@ -399,12 +398,6 @@ class SendMediaMessageController extends AsyncNotifier<void> {
     required String fileExt,
     String? caption,
   }) async {
-    // Phase 2 (wisp_fixes_handoff.md item 1) — re-encode to WebP before
-    // the upload-cap check below, so [MediaRepository.maxImageBytes]
-    // applies to what actually reaches Storage. Falls back to the
-    // original bytes on any compression failure (see
-    // MediaRepository.reencodeImageToWebp's doc comment), so this
-    // never blocks a send.
     final webpBytes =
         await ref.read(mediaRepositoryProvider).reencodeImageToWebp(bytes);
     return _sendMedia(
@@ -508,11 +501,6 @@ class SendMediaMessageController extends AsyncNotifier<void> {
     });
     state = result;
 
-    // Phase 9 — fire-and-forget, same "don't hold up the send" shape
-    // as Phase 7's translation step (see SendMessageController). The
-    // voice note itself has already landed and is playable; a failed
-    // transcription/action-extraction pass is never surfaced as a
-    // failed *send*.
     if (!result.hasError && type == 'voice') {
       unawaited(_transcribeAndExtractActions(
         messageId: messageId,
@@ -523,15 +511,6 @@ class SendMediaMessageController extends AsyncNotifier<void> {
     return !result.hasError;
   }
 
-  /// AI Feature 3 (PRD.md §10, Phase 9): transcribes the voice note via
-  /// Gemini's native audio input, then runs a second text pass over
-  /// the transcript to pull out action items/reminders — both results
-  /// written back onto the same `messages` row so the realtime stream
-  /// (already open on this conversation, per `chatMessagesControllerProvider`)
-  /// carries them to both sides the moment they're ready. Unlike
-  /// translation, this isn't scoped to direct chats —
-  /// `voice_transcript`/`voice_actions` are per-message columns, not
-  /// per-recipient, so there's no group-chat ambiguity to work around.
   Future<void> _transcribeAndExtractActions({
     required String messageId,
     required Uint8List audioBytes,
@@ -545,9 +524,6 @@ class SendMediaMessageController extends AsyncNotifier<void> {
       try {
         actions = await repo.extractActions(transcript);
       } catch (_) {
-        // The transcript is still worth saving even if the second
-        // (action-extraction) pass fails — two independent AI calls
-        // per plan.md, not an all-or-nothing pair.
       }
 
       await ref.read(messageRepositoryProvider).updateVoiceTranscription(
@@ -558,7 +534,6 @@ class SendMediaMessageController extends AsyncNotifier<void> {
                 : {'items': actions.map((a) => a.toJson()).toList()},
           );
     } catch (_) {
-      // Best-effort — see the doc comment above.
     }
   }
 

@@ -14,16 +14,9 @@ import '../../../core/errors/failure.dart';
 /// signed URL to actually display/download the file — never
 /// `getPublicUrl`.
 ///
-/// Cleanup note: this file used to also declare its own
-/// `mediaRepositoryProvider`, duplicating the one in
-/// `providers/message_provider.dart` — the only place anything actually
-/// imported it from. Both wrapped the same `Supabase.instance.client`,
-/// so it was a behaviorless duplicate, not a bug, but it broke this
-/// codebase's own convention (every other repository's provider —
-/// `messageRepositoryProvider`, `conversationRepositoryProvider`, etc.
-/// — lives in its feature's `providers/` file, never in `data/`).
-/// Removed here; `mediaRepositoryProvider` now has exactly one
-/// declaration, in `message_provider.dart`.
+/// Phase 6 optimization: includes an in-memory URL & file metadata cache
+/// so scrolling past previously loaded media/documents doesn't trigger
+/// duplicate HTTP requests to Supabase Storage.
 class MediaRepository {
   MediaRepository(this._client);
   final SupabaseClient _client;
@@ -37,6 +30,9 @@ class MediaRepository {
   /// Batch 5c — generous relative to actual size: a 64kbps mono AAC
   /// recording this size would run ~20+ minutes.
   static const maxVoiceBytes = 10 * 1024 * 1024; // 10MB
+
+  final Map<String, (String url, DateTime expiresAt)> _urlCache = {};
+  final Map<String, (MediaFileInfo info, DateTime expiresAt)> _fileInfoCache = {};
 
   /// Path convention per architecture.md:
   /// `{conversation_id}/{message_id}/{filename}`. [messageId] is
@@ -71,26 +67,36 @@ class MediaRepository {
   }
 
   /// Signed URL only — use for images/video/voice where the UI doesn't
-  /// need to show a filename or size.
+  /// need to show a filename or size. Cached in memory with an expiry buffer.
   Future<String> resolveSignedUrl(
     String path, {
     int expiresInSeconds = 3600,
   }) async {
+    final cached = _urlCache[path];
+    if (cached != null && DateTime.now().isBefore(cached.$2)) {
+      return cached.$1;
+    }
     try {
-      return await _client.storage
+      final url = await _client.storage
           .from(bucket)
           .createSignedUrl(path, expiresInSeconds);
+      _urlCache[path] = (
+        url,
+        DateTime.now().add(Duration(seconds: expiresInSeconds - 300)),
+      );
+      return url;
     } on StorageException catch (e) {
       throw SupabaseFailure(e.message);
     }
   }
 
   /// Batch 5b — signed URL *and* the object's byte size, for document
-  /// bubbles ("report.pdf · 2.4 MB"). One extra `list()` call versus
-  /// [resolveSignedUrl] (a signed-URL response has no size field) —
-  /// preferred over inventing a `messages.file_size` column not in
-  /// ERD.md.
+  /// bubbles ("report.pdf · 2.4 MB"). Cached in memory with an expiry buffer.
   Future<MediaFileInfo> resolveFileInfo(String path) async {
+    final cached = _fileInfoCache[path];
+    if (cached != null && DateTime.now().isBefore(cached.$2)) {
+      return cached.$1;
+    }
     try {
       final segments = path.split('/');
       final fileName = segments.removeLast();
@@ -110,11 +116,16 @@ class MediaRepository {
 
       final url =
           await _client.storage.from(bucket).createSignedUrl(path, 3600);
-      return MediaFileInfo(
+      final info = MediaFileInfo(
         url: url,
         fileName: fileName,
         sizeBytes: sizeBytes,
       );
+      _fileInfoCache[path] = (
+        info,
+        DateTime.now().add(const Duration(seconds: 3300)),
+      );
+      return info;
     } on StorageException catch (e) {
       throw SupabaseFailure(e.message);
     }

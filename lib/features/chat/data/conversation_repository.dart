@@ -193,19 +193,20 @@ class ConversationRepository {
   }
 
   /// Fetches every conversation [myId] is a member of, each paired
-  /// with the other participant (direct chats) and its most recent
-  /// message (chat list preview, Batch 6b).
+  /// with the other participant (direct chats), its most recent message,
+  /// and its unread count.
   ///
-  /// Phase 2 fix (wisp_fixes_handoff.md, Finding D): this used to run
-  /// two sequential `await`ed queries per conversation inside a `for`
-  /// loop — one round trip at a time, so 10 chats meant 20+ serial
-  /// round trips end to end. Still N+1 in *query count* (PostgREST
-  /// embedding doesn't cleanly support order+limit-1 on a nested
-  /// resource, so a single combined query isn't practical here), but
-  /// every conversation's pair of queries — and every conversation's
-  /// pair relative to every other conversation's — now fires
-  /// concurrently via [Future.wait], so wall-clock time is roughly one
-  /// round trip's worth regardless of chat count, not one per chat.
+  /// The chat list is refreshed by realtime events, so this path must not
+  /// multiply work by opening a separate member and unread query for every
+  /// conversation. The member/profile lookup and unread-count lookup are
+  /// batched once for the whole list. The latest-message lookup remains one
+  /// bounded query per conversation because PostgREST cannot safely express
+  /// "latest row per conversation" with the current schema and no RPC.
+  ///
+  /// This preserves the existing data contract and sorting while reducing
+  /// the list refresh from roughly `1 + 3C` requests to `2 + C`, where `C`
+  /// is the number of conversations. The returned rows are still filtered
+  /// by the same RLS policies as before.
   Future<List<ConversationSummary>> fetchMyConversationSummaries(
     String myId,
   ) async {
@@ -219,13 +220,31 @@ class ConversationRepository {
           .map((r) =>
               Conversation.fromJson(r['conversations'] as Map<String, dynamic>))
           .toList();
+      if (conversations.isEmpty) return const [];
 
-      final summaries = await Future.wait(conversations.map(
-        (conversation) => _fetchSummary(conversation: conversation, myId: myId),
-      ));
+      final conversationIds = conversations.map((c) => c.id).toList();
+      final results = await Future.wait<dynamic>([
+        _fetchDirectProfilesByConversation(
+          conversationIds: conversationIds,
+          myId: myId,
+        ),
+        _fetchUnreadCountsByConversation(
+          conversationIds: conversationIds,
+          myId: myId,
+        ),
+      ]);
 
-      // Most recently active conversation first — falls back to
-      // `conversations.created_at` for a chat with no messages yet.
+      final profilesByConversation = results[0] as Map<String, Profile?>;
+      final unreadCounts = results[1] as Map<String, int>;
+
+      final summaries = await Future.wait(conversations.map((conversation) {
+        return _fetchSummary(
+          conversation: conversation,
+          otherProfile: profilesByConversation[conversation.id],
+          unreadCount: unreadCounts[conversation.id] ?? 0,
+        );
+      }));
+
       summaries.sort((a, b) {
         final aTime = a.lastMessage?.createdAt ?? a.conversation.createdAt;
         final bTime = b.lastMessage?.createdAt ?? b.conversation.createdAt;
@@ -238,75 +257,80 @@ class ConversationRepository {
     }
   }
 
-  /// One conversation's trio of lookups (other member + last message +
-  /// unread count), run concurrently with each other via [Future.wait]
-  /// — the unit of work [fetchMyConversationSummaries] then fans out
-  /// across all of a user's conversations at once.
-  Future<ConversationSummary> _fetchSummary({
-    required Conversation conversation,
+  /// Fetches every member/profile row for the list's conversations once,
+  /// then keeps the member that is not [myId] for direct conversations.
+  /// Groups intentionally remain null, matching the previous behavior.
+  Future<Map<String, Profile?>> _fetchDirectProfilesByConversation({
+    required List<String> conversationIds,
     required String myId,
   }) async {
-    final results = await Future.wait<dynamic>([
-      conversation.isDirect
-          ? getOtherDirectMember(conversationId: conversation.id, myId: myId)
-          : Future<Profile?>.value(null),
-      _client
-          .from('messages')
-          .select()
-          .eq('conversation_id', conversation.id)
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle(),
-      _fetchUnreadCount(conversationId: conversation.id, myId: myId),
-    ]);
+    final rows = await _client
+        .from('conversation_members')
+        .select('conversation_id, user_id, profiles!inner(*)')
+        .inFilter('conversation_id', conversationIds);
 
-    final otherProfile = results[0] as Profile?;
-    final lastMessageRow = results[1] as Map<String, dynamic>?;
-    final unreadCount = results[2] as int;
-
-    return ConversationSummary(
-      conversation: conversation,
-      otherProfile: otherProfile,
-      lastMessage:
-          lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
-      unreadCount: unreadCount,
-    );
+    final profiles = <String, Profile?>{};
+    for (final raw in rows as List) {
+      final row = raw as Map<String, dynamic>;
+      final conversationId = row['conversation_id'] as String;
+      final userId = row['user_id'] as String;
+      if (userId == myId) continue;
+      final profileRow = row['profiles'];
+      if (profileRow is Map<String, dynamic>) {
+        profiles[conversationId] = Profile.fromJson(profileRow);
+      }
+    }
+    return profiles;
   }
 
-  /// Phase 3 (wisp_fixes_handoff.md item 3, step 1) — count of
-  /// [conversationId]'s incoming messages not yet 'read' by [myId].
-  /// One query: fetch every incoming message id (mirroring
-  /// `MessageRepository._incomingMessageIds`'s `neq('sender_id', myId)`
-  /// exactly, for the reason documented on
-  /// `ConversationSummary.unreadCount`), each with its
-  /// `message_status` rows embedded unfiltered — same "fetch related
-  /// rows unfiltered, then reason about them client-side" shape
-  /// `StoryRepository.fetchActiveStoryGroups` already uses for
-  /// `story_views`, rather than trying to filter the embedded resource
-  /// itself (which would force an inner join and silently drop
-  /// messages with no status row yet — exactly the "delivered" gap
-  /// this count needs to catch). A message counts as unread unless one
-  /// of its embedded status rows belongs to [myId] with status='read'.
-  Future<int> _fetchUnreadCount({
-    required String conversationId,
+  /// Fetches unread candidates for all conversations in one request. The
+  /// per-message semantics are intentionally unchanged: an incoming message
+  /// is unread unless this user has a related status row with `read` status.
+  Future<Map<String, int>> _fetchUnreadCountsByConversation({
+    required List<String> conversationIds,
     required String myId,
   }) async {
     final rows = await _client
         .from('messages')
-        .select('id, message_status(user_id, status)')
-        .eq('conversation_id', conversationId)
+        .select('conversation_id, message_status(user_id, status)')
+        .inFilter('conversation_id', conversationIds)
         .neq('sender_id', myId);
 
-    var unread = 0;
+    final unreadCounts = <String, int>{};
     for (final raw in rows as List) {
       final row = raw as Map<String, dynamic>;
+      final conversationId = row['conversation_id'] as String;
       final statusRows = (row['message_status'] as List?) ?? const [];
       final isReadByMe = statusRows.any((s) {
         final status = s as Map<String, dynamic>;
         return status['user_id'] == myId && status['status'] == 'read';
       });
-      if (!isReadByMe) unread++;
+      if (!isReadByMe) {
+        unreadCounts[conversationId] = (unreadCounts[conversationId] ?? 0) + 1;
+      }
     }
-    return unread;
+    return unreadCounts;
+  }
+
+  Future<ConversationSummary> _fetchSummary({
+    required Conversation conversation,
+    required Profile? otherProfile,
+    required int unreadCount,
+  }) async {
+    final lastMessageRow = await _client
+        .from('messages')
+        .select()
+        .eq('conversation_id', conversation.id)
+        .order('created_at', ascending: false)
+        .limit(1)
+        .maybeSingle();
+
+    return ConversationSummary(
+      conversation: conversation,
+      otherProfile: conversation.isDirect ? otherProfile : null,
+      lastMessage:
+          lastMessageRow != null ? Message.fromJson(lastMessageRow) : null,
+      unreadCount: unreadCount,
+    );
   }
 }

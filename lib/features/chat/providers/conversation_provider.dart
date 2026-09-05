@@ -125,17 +125,32 @@ final myConversationSummariesProvider =
   final repo = ref.watch(conversationRepositoryProvider);
   final controller = StreamController<List<ConversationSummary>>();
   Timer? debounce;
+  var refreshInFlight = false;
+  var refreshQueued = false;
 
   Future<void> refresh() async {
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return;
+    }
+
+    refreshInFlight = true;
     try {
       final summaries = await repo.fetchMyConversationSummaries(myId);
       if (!controller.isClosed) controller.add(summaries);
     } catch (e, st) {
       if (!controller.isClosed) controller.addError(e, st);
+    } finally {
+      refreshInFlight = false;
+      if (refreshQueued && !controller.isClosed) {
+        refreshQueued = false;
+        scheduleRefresh();
+      }
     }
   }
 
   void scheduleRefresh() {
+    if (controller.isClosed) return;
     debounce?.cancel();
     debounce = Timer(const Duration(milliseconds: 300), refresh);
   }
@@ -197,6 +212,7 @@ final myConversationSummariesProvider =
 
   ref.onDispose(() {
     debounce?.cancel();
+    refreshQueued = false;
     SupabaseConfig.client.removeChannel(messagesChannel);
     SupabaseConfig.client.removeChannel(membersChannel);
     SupabaseConfig.client.removeChannel(readReceiptsChannel);

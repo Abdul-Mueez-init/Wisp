@@ -88,16 +88,33 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   }
 
   /// Bounded read-receipt update: passes the visible/loaded incoming message IDs
-  /// directly to `markRead()`, updating non-read status rows and inserting
-  /// missing ones without full-history scans or redundant markDelivered calls.
+  /// directly to `markRead()`/`markDelivered()`, updating non-read status rows and
+  /// inserting missing ones without full-history scans.
+  ///
+  /// BUGFIX: an earlier pass dropped the `markDelivered()` call entirely,
+  /// leaving `markRead()` as the only write. `markRead()` only *updates* a
+  /// status row that already exists (delivered -> read); if none exists yet
+  /// it inserts one directly as 'read'. Skipping markDelivered meant every
+  /// first-time read skipped the 'delivered' state completely: the sent-
+  /// side tick would jump straight from single-tick (unsent/sent) to
+  /// double-tick-blue (read) and never show plain double-tick (delivered)
+  /// in between — a real, user-visible regression from baseline behavior.
+  /// Calling markDelivered() first (bounded, same messageIds) restores that
+  /// intermediate state and, as a side effect, means the first write to a
+  /// previously-untracked message is now an INSERT of a 'delivered' row
+  /// followed by an UPDATE to 'read' — which is what
+  /// `conversation_provider.dart`'s chat-list read-receipts channel expects.
   Future<void> _syncReadReceipts([List<Message>? messages]) async {
     final myId = ref.read(currentSessionProvider)?.user.id;
     if (myId == null) return;
     final repo = ref.read(messageRepositoryProvider);
-    final incomingIds = messages
-        ?.where((m) => m.senderId != myId)
-        .map((m) => m.id)
-        .toList();
+    final incomingIds =
+        messages?.where((m) => m.senderId != myId).map((m) => m.id).toList();
+    await repo.markDelivered(
+      conversationId: widget.conversationId,
+      myId: myId,
+      messageIds: incomingIds,
+    );
     await repo.markRead(
       conversationId: widget.conversationId,
       myId: myId,
@@ -230,8 +247,7 @@ class _ChatDetailAppBar extends ConsumerWidget {
     final conversationAsync = needsConversationFetch
         ? ref.watch(conversationByIdProvider(conversationId))
         : null;
-    final resolvedConversation =
-        groupConversation ?? conversationAsync?.value;
+    final resolvedConversation = groupConversation ?? conversationAsync?.value;
     final isGroup = resolvedConversation?.isGroup ?? false;
 
     final otherProfileAsync =
@@ -257,11 +273,9 @@ class _ChatDetailAppBar extends ConsumerWidget {
         centralPresence?.lastSeenAt ?? displayProfile?.lastSeenAt;
 
     final typingUserIds =
-        ref.watch(typingUsersStreamProvider(conversationId)).value ??
-            const [];
+        ref.watch(typingUsersStreamProvider(conversationId)).value ?? const [];
 
-    final aiThinking =
-        ref.watch(aiAgentThinkingProvider(conversationId));
+    final aiThinking = ref.watch(aiAgentThinkingProvider(conversationId));
     final subtitleText = isAiConversation && aiThinking
         ? 'Wisp is typing…'
         : _subtitleText(
@@ -456,13 +470,12 @@ class _ChatMessageList extends ConsumerWidget {
     if (chatState.messages.isEmpty) {
       if (isAiConversation) {
         return _AiWelcomeView(
-          onSuggestionTap: (text) => ref
-              .read(sendMessageControllerProvider.notifier)
-              .sendText(
-                conversationId: conversationId,
-                content: text,
-                isAiConversation: true,
-              ),
+          onSuggestionTap: (text) =>
+              ref.read(sendMessageControllerProvider.notifier).sendText(
+                    conversationId: conversationId,
+                    content: text,
+                    isAiConversation: true,
+                  ),
         );
       }
       return Center(
@@ -523,6 +536,7 @@ class _ChatMessageList extends ConsumerWidget {
 
           return MessageBubble(
             key: ValueKey(message.id),
+            conversationId: conversationId,
             message: message,
             isMine: isMine,
             senderLabel: senderLabel,
@@ -576,8 +590,7 @@ class _ChatLiveLocationBanner extends ConsumerWidget {
           TextButton(
             onPressed: () =>
                 ref.read(liveLocationControllerProvider.notifier).stop(),
-            child: const Text('Stop',
-                style: TextStyle(color: AppColors.cream)),
+            child: const Text('Stop', style: TextStyle(color: AppColors.cream)),
           ),
         ],
       ),
@@ -644,9 +657,7 @@ class _ChatInputArea extends ConsumerWidget {
       onSendImage: (bytes, ext) => _sendMedia(
         context,
         ref,
-        () => ref
-            .read(sendMediaMessageControllerProvider.notifier)
-            .sendImage(
+        () => ref.read(sendMediaMessageControllerProvider.notifier).sendImage(
               conversationId: conversationId,
               bytes: bytes,
               fileExt: ext,
@@ -655,9 +666,7 @@ class _ChatInputArea extends ConsumerWidget {
       onSendVideo: (bytes, ext) => _sendMedia(
         context,
         ref,
-        () => ref
-            .read(sendMediaMessageControllerProvider.notifier)
-            .sendVideo(
+        () => ref.read(sendMediaMessageControllerProvider.notifier).sendVideo(
               conversationId: conversationId,
               bytes: bytes,
               fileExt: ext,
@@ -666,20 +675,17 @@ class _ChatInputArea extends ConsumerWidget {
       onSendDocument: (bytes, fileName) => _sendMedia(
         context,
         ref,
-        () => ref
-            .read(sendMediaMessageControllerProvider.notifier)
-            .sendDocument(
-              conversationId: conversationId,
-              bytes: bytes,
-              fileName: fileName,
-            ),
+        () =>
+            ref.read(sendMediaMessageControllerProvider.notifier).sendDocument(
+                  conversationId: conversationId,
+                  bytes: bytes,
+                  fileName: fileName,
+                ),
       ),
       onSendVoice: (bytes) => _sendMedia(
         context,
         ref,
-        () => ref
-            .read(sendMediaMessageControllerProvider.notifier)
-            .sendVoice(
+        () => ref.read(sendMediaMessageControllerProvider.notifier).sendVoice(
               conversationId: conversationId,
               bytes: bytes,
             ),
@@ -687,9 +693,7 @@ class _ChatInputArea extends ConsumerWidget {
       onShareContact: (profile) => _sendMedia(
         context,
         ref,
-        () => ref
-            .read(sendMessageControllerProvider.notifier)
-            .sendContact(
+        () => ref.read(sendMessageControllerProvider.notifier).sendContact(
               conversationId: conversationId,
               sharedContactId: profile.id,
             ),

@@ -26,11 +26,16 @@ import '../../location/widgets/location_bubble_content.dart';
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
     super.key,
+    required this.conversationId,
     required this.message,
     required this.isMine,
     this.senderLabel,
   });
 
+  /// Phase 4 — needed so [_StatusTick] can watch the per-conversation
+  /// `messageStatusByIdProvider(conversationId)` family instead of one
+  /// shared, unscoped map (see message_provider.dart).
+  final String conversationId;
   final Message message;
   final bool isMine;
   final String? senderLabel;
@@ -126,7 +131,10 @@ class MessageBubble extends StatelessWidget {
                 ),
                 if (isMine) ...[
                   const SizedBox(width: 4),
-                  _StatusTick(messageId: message.id),
+                  _StatusTick(
+                    conversationId: conversationId,
+                    messageId: message.id,
+                  ),
                 ],
               ],
             ),
@@ -402,15 +410,22 @@ class _VideoBubbleContent extends ConsumerWidget {
 /// rebuilds just this small icon, not the bubble, the message list, or
 /// the screen. Same 'sent'/'delivered'/'read' → icon/color mapping as
 /// before, just resolved locally instead of via a passed-in parameter.
+///
+/// Phase 4 — watches the `.family`-scoped `messageStatusByIdProvider`
+/// (keyed by [conversationId]) instead of one shared global map, so this
+/// tick's own map only ever contains statuses relevant to messages loaded
+/// in this conversation, not this user's entire status history.
 class _StatusTick extends ConsumerWidget {
-  const _StatusTick({required this.messageId});
+  const _StatusTick({required this.conversationId, required this.messageId});
 
+  final String conversationId;
   final String messageId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(
-      messageStatusByIdProvider.select((map) => map[messageId]?.status),
+      messageStatusByIdProvider(conversationId)
+          .select((map) => map[messageId]?.status),
     );
     return Icon(
       _statusIcon(status),

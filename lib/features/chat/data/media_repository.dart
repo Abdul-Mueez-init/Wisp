@@ -31,8 +31,23 @@ class MediaRepository {
   /// recording this size would run ~20+ minutes.
   static const maxVoiceBytes = 10 * 1024 * 1024; // 10MB
 
+  /// Phase 6 fix: these caches previously had no upper bound — every
+  /// distinct media path resolved during the app's lifetime stayed in
+  /// memory forever, growing without limit for a long-lived install with
+  /// a lot of media history. Dart's `Map` preserves insertion order, so
+  /// the oldest entry is always the first key; capping and evicting that
+  /// first key on overflow gives simple, correct FIFO-bounded memory use
+  /// without needing a separate LRU structure.
+  static const _maxCacheEntries = 300;
+
   final Map<String, (String url, DateTime expiresAt)> _urlCache = {};
-  final Map<String, (MediaFileInfo info, DateTime expiresAt)> _fileInfoCache = {};
+  final Map<String, (MediaFileInfo info, DateTime expiresAt)> _fileInfoCache =
+      {};
+
+  void _evictOldestIfNeeded(Map<String, dynamic> cache) {
+    if (cache.length <= _maxCacheEntries) return;
+    cache.remove(cache.keys.first);
+  }
 
   /// Path convention per architecture.md:
   /// `{conversation_id}/{message_id}/{filename}`. [messageId] is
@@ -84,6 +99,7 @@ class MediaRepository {
         url,
         DateTime.now().add(Duration(seconds: expiresInSeconds - 300)),
       );
+      _evictOldestIfNeeded(_urlCache);
       return url;
     } on StorageException catch (e) {
       throw SupabaseFailure(e.message);
@@ -125,6 +141,7 @@ class MediaRepository {
         info,
         DateTime.now().add(const Duration(seconds: 3300)),
       );
+      _evictOldestIfNeeded(_fileInfoCache);
       return info;
     } on StorageException catch (e) {
       throw SupabaseFailure(e.message);

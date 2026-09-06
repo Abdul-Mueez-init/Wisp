@@ -168,11 +168,28 @@ class ChatMessagesController extends StateNotifier<ChatMessagesState> {
   ///
   /// Optimization: if an existing message row is unchanged, no-ops to avoid
   /// triggering unneeded state notifications.
+  ///
+  /// BUGFIX: this previously compared `current[index] == message`, but
+  /// `Message` (models/message.dart) doesn't override `operator ==` or
+  /// `hashCode` — it falls back to `Object`'s identity comparison. Every
+  /// `Message` here comes from `Message.fromJson`, a fresh object every
+  /// single time, so that comparison was `false` for every single
+  /// realtime UPDATE, including genuine no-op re-deliveries of an
+  /// unchanged row. The "skip no-op upsert" optimization never actually
+  /// skipped anything — dead code, not a working optimization. Replaced
+  /// with an explicit field-by-field comparison of the columns that can
+  /// actually change post-insert (translation, voice transcript/actions,
+  /// live-location pin/expiry), so a genuine no-op update now correctly
+  /// short-circuits without a `List.from` copy or a `state` reassignment.
+  /// Deliberately done here rather than adding `==`/`hashCode` to the
+  /// shared `Message` model, since that model is used elsewhere in the
+  /// app (equality there could have wider, unrelated effects) — this
+  /// keeps the fix contained to the one place it's actually needed.
   void _upsert(Message message) {
     final current = state.messages;
     final index = current.indexWhere((m) => m.id == message.id);
     if (index != -1) {
-      if (current[index] == message) return;
+      if (_unchanged(current[index], message)) return;
       final list = List<Message>.from(current);
       list[index] = message;
       state = state.copyWith(messages: list);
@@ -181,6 +198,41 @@ class ChatMessagesController extends StateNotifier<ChatMessagesState> {
       list.insert(_sortedInsertIndex(list, message), message);
       state = state.copyWith(messages: list);
     }
+  }
+
+  /// True if [a] and [b] are the same message row with no field changed
+  /// that this app ever actually mutates post-insert. `id`/`conversationId`
+  /// /`senderId`/`type`/`createdAt` are immutable once a row exists, so
+  /// they're intentionally not part of this check.
+  bool _unchanged(Message a, Message b) {
+    return a.content == b.content &&
+        a.mediaUrl == b.mediaUrl &&
+        a.originalLanguage == b.originalLanguage &&
+        a.translatedContent == b.translatedContent &&
+        a.sharedContactId == b.sharedContactId &&
+        a.locationLat == b.locationLat &&
+        a.locationLng == b.locationLng &&
+        a.isLiveLocation == b.isLiveLocation &&
+        a.liveLocationExpiresAt == b.liveLocationExpiresAt &&
+        a.voiceTranscript == b.voiceTranscript &&
+        _voiceActionsEqual(a.voiceActions, b.voiceActions);
+  }
+
+  /// `voiceActions` is a `Map<String, dynamic>?` (decoded jsonb) — two
+  /// separately-decoded maps with identical content are also not `==`
+  /// under Dart's default map equality, so this compares key/value pairs
+  /// directly instead of relying on `==`. Shallow is sufficient here: the
+  /// only writer of this field (`updateVoiceTranscription`) always
+  /// replaces it wholesale rather than mutating nested values.
+  bool _voiceActionsEqual(Map<String, dynamic>? a, Map<String, dynamic>? b) {
+    if (a == null || b == null) return a == b;
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (!b.containsKey(entry.key) || b[entry.key] != entry.value) {
+        return false;
+      }
+    }
+    return true;
   }
 
   int _sortedInsertIndex(List<Message> list, Message message) {
@@ -223,22 +275,54 @@ final chatMessagesControllerProvider = StateNotifierProvider.autoDispose
 
 /// Phase 4 optimization: auto-disposed when no widget is watching status ticks,
 /// preventing idle background status stream subscriptions.
+///
+/// NOT narrowed to one conversation: `message_status` has no
+/// `conversation_id` column, and Supabase Realtime's `PostgresChangeFilter`
+/// only supports a single-column `eq` — there is no server-side way to
+/// filter this table's changefeed down to "just the rows for messages in
+/// conversation X" without denormalizing a `conversation_id` column onto
+/// `message_status` (or adding a dedicated RPC/view). That is a schema
+/// change and, per rules.md Rule 8, is NOT made silently here — it needs
+/// to be raised with the user and confirmed as its own migration before
+/// implementation. Until then, this stream is necessarily RLS-scoped to
+/// "everything this user is allowed to see" rather than one conversation.
 final messageStatusesStreamProvider =
     StreamProvider.autoDispose<List<MessageStatus>>((ref) {
   return ref.watch(messageRepositoryProvider).watchMyVisibleStatuses();
 });
 
-/// Perf fix (WISP_PERFORMANCE_HANDOFF.md §5) — indexes the raw status
-/// list by `messageId` once per stream emission, instead of every
-/// message bubble scanning the full list with `.where()` on every
-/// build. `MessageBubble`'s status-tick widget watches this via
-/// `.select` so a status change only rebuilds the one bubble it
-/// belongs to, not the whole message list or screen. Same values,
-/// same semantics as before — just an O(1) lookup instead of O(n).
-final messageStatusByIdProvider =
-    Provider.autoDispose<Map<String, MessageStatus>>((ref) {
+/// Phase 4 narrowing (client-side, given the schema constraint above) —
+/// scoped per open conversation via `.family` instead of one shared global
+/// map. Derives the subset of [messageStatusesStreamProvider]'s rows that
+/// belong to messages actually loaded in [conversationId]'s current
+/// window (the same bounded list `chatMessagesControllerProvider` already
+/// maintains), so:
+///  - a status event for a message in some *other*, currently-closed
+///    conversation never appears in the map this screen's bubbles depend
+///    on, and doesn't grow it;
+///  - the map itself stays bounded to this conversation's loaded window
+///    (tens of messages), not this user's entire status history;
+///  - it's `.autoDispose` and `.family`-scoped, so it's torn down the
+///    moment `ChatDetailScreen` for that conversation unmounts, same
+///    lifecycle as `chatMessagesControllerProvider`.
+/// `MessageBubble`'s status-tick widget still watches this via `.select`
+/// so a status change only rebuilds the one bubble it belongs to, not the
+/// whole message list or screen. Same values, same semantics as before —
+/// just bounded to what this conversation actually needs instead of every
+/// status row this user can see across every conversation.
+final messageStatusByIdProvider = Provider.autoDispose
+    .family<Map<String, MessageStatus>, String>((ref, conversationId) {
+  final relevantIds = ref
+      .watch(chatMessagesControllerProvider(conversationId))
+      .messages
+      .map((m) => m.id)
+      .toSet();
+  if (relevantIds.isEmpty) return const {};
   final statuses = ref.watch(messageStatusesStreamProvider).value ?? const [];
-  return {for (final s in statuses) s.messageId: s};
+  return {
+    for (final s in statuses)
+      if (relevantIds.contains(s.messageId)) s.messageId: s,
+  };
 });
 
 final otherDirectMemberProvider =
@@ -252,14 +336,28 @@ final otherDirectMemberProvider =
 });
 
 /// Lightweight — URL only. Used by image/video/voice bubbles.
+///
+/// Phase 6 fix: this was a plain (non-autoDispose) `FutureProvider.family`,
+/// meaning the provider container kept one entry alive *forever* for
+/// every distinct media path ever viewed in the current app session —
+/// unbounded growth for a long-lived chat with lots of media, on top of
+/// `MediaRepository`'s own in-memory cache. Made `.autoDispose`: when a
+/// bubble scrolls far enough off-screen that `ListView.builder` disposes
+/// its widget (and nothing else is watching this path), the provider
+/// entry is torn down too. If the same media scrolls back into view,
+/// `MediaRepository`'s own signed-URL/file-info cache (keyed the same way,
+/// with its own bounded eviction — see media_repository.dart) still
+/// serves it as an in-memory hit rather than a real network request, so
+/// autoDispose here doesn't reintroduce duplicate Storage calls.
 final mediaSignedUrlProvider =
-    FutureProvider.family<String, String>((ref, mediaPath) {
+    FutureProvider.autoDispose.family<String, String>((ref, mediaPath) {
   return ref.watch(mediaRepositoryProvider).resolveSignedUrl(mediaPath);
 });
 
 /// Batch 5b — URL + filename + size. Used by document bubbles.
+/// Same Phase 6 `.autoDispose` fix and reasoning as [mediaSignedUrlProvider].
 final mediaFileInfoProvider =
-    FutureProvider.family<MediaFileInfo, String>((ref, mediaPath) {
+    FutureProvider.autoDispose.family<MediaFileInfo, String>((ref, mediaPath) {
   return ref.watch(mediaRepositoryProvider).resolveFileInfo(mediaPath);
 });
 
@@ -523,8 +621,7 @@ class SendMediaMessageController extends AsyncNotifier<void> {
       List<VoiceActionItem> actions = const [];
       try {
         actions = await repo.extractActions(transcript);
-      } catch (_) {
-      }
+      } catch (_) {}
 
       await ref.read(messageRepositoryProvider).updateVoiceTranscription(
             messageId: messageId,
@@ -533,8 +630,7 @@ class SendMediaMessageController extends AsyncNotifier<void> {
                 ? null
                 : {'items': actions.map((a) => a.toJson()).toList()},
           );
-    } catch (_) {
-    }
+    } catch (_) {}
   }
 
   String _typeLabel(String type) {

@@ -190,15 +190,37 @@ final myConversationSummariesProvider =
   // only after refresh") — `markRead()` (chat_detail_screen.dart's
   // `_syncReadReceipts`) writes to `message_status`, not `messages`,
   // so the two channels above never fired when a chat got read. Third
-  // channel, same pattern: any `message_status` row update for rows
+  // channel, same pattern: any `message_status` row change for rows
   // belonging to *this* user (the recipient whose read-state actually
   // drives `ConversationSummary.unreadCount`) schedules the same
   // debounced refetch. Filtered with `eq` on `user_id` — unlike the
   // other two channels, `message_status_select_own`'s RLS shape is a
   // single-column equality, so a server-side filter is both possible
   // and cheaper than relying on RLS alone here.
+  //
+  // Listens to BOTH insert and update: `markDelivered()`/`markRead()`
+  // (message_repository.dart) insert a brand-new row for any message
+  // that doesn't already have a status row for this user, and only
+  // UPDATE a row that already exists. The common case — opening a chat
+  // that has never had a status row written for it yet — is an INSERT,
+  // not an UPDATE. Listening to `update` only (as this channel
+  // originally did) silently reintroduces the exact "badge doesn't
+  // clear until a manual refresh" bug this channel was added to fix,
+  // because the very first read-receipt for a conversation almost
+  // always lands as an insert.
   final readReceiptsChannel = SupabaseConfig.client
       .channel('chat-list-read-receipts-$myId')
+      .onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'message_status',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'user_id',
+          value: myId,
+        ),
+        callback: (_) => scheduleRefresh(),
+      )
       .onPostgresChanges(
         event: PostgresChangeEvent.update,
         schema: 'public',
